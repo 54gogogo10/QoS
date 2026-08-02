@@ -66,7 +66,7 @@ flows:
 - **每流一个 goroutine + 一个 UDP socket**：socket 绑定 `src_ip:src_port`，`connect` 到 `dst_ip:dst_port`。
 - **DSCP 标记**：IPv4 用 `setsockopt(IP_TOS)`，IPv6 用 `IPV6_TCLASS`，值 = `dscp << 2`。
 - **双参数令牌桶限速**：字节桶（按 rate_mbps）+ 包桶（按 rate_pps），哪个先耗尽就等哪个。调度粒度 10ms：每 10ms 计算本轮可发包数，批量 `sendto`，避免逐包睡眠。
-- **包格式**：`[magic 4B][flow_id 2B][seq 4B] + 填充字节`，总长 = 8 + payload_size。seq 从 1 递增，接收端据此计算丢包。
+- **包格式**：`[magic 4B][flow_id 2B][seq 4B] + 填充字节`，总长 = 10 + payload_size。seq 从 1 递增，接收端据此计算丢包。
 - **防漂移**：按绝对时间点调度（记录下次唤醒绝对时间，而非每次固定 sleep），长时间运行不漂移。
 - **速率精度**：10ms 批调度下 1 Gbps 以内 ±1%，高 pps 小包可支撑数万 pps/流。
 
