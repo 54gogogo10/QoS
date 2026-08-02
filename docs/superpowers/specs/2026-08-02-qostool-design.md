@@ -135,7 +135,7 @@ QoS/
 - seq 跳号丢包计算
 - DSCP 名字 ↔ 数值映射（含 0-63 边界）
 
-**端到端**：`bidir -i lo`（Linux lo / Windows Npcap 环回）跑数秒，验证 8 条流全部收发、丢包率 ≈ 0、速率符合配置。
+**端到端**：`bidir -i lo`（Linux lo / Windows 需安装并启用 Npcap Loopback Adapter 才能抓到环回流量）跑数秒，验证 8 条流全部收发、丢包率 ≈ 0、速率符合配置。Windows 上如未启用环回抓包，`-i lo` 会收不到包，README 中注明该前提。
 
 ## 11. 分发
 
