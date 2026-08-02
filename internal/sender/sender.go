@@ -23,11 +23,13 @@ type Sender struct {
 }
 
 // New 创建发送器；每条流一个 UDP socket。
+// 任一 flow 创建失败时，已创建的 socket 全部关闭（避免端口泄漏）。
 func New(cfg *config.Config, agg *stats.Aggregator) (*Sender, error) {
 	s := &Sender{agg: agg}
 	for i, f := range cfg.Flows {
 		fw, err := newFlow(i, f, agg)
 		if err != nil {
+			s.Close() // 关闭已创建的 socket，释放端口
 			return nil, fmt.Errorf("flow %d (%s): %w", i+1, f.Name, err)
 		}
 		s.flows = append(s.flows, fw)

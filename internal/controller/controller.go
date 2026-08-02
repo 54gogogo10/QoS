@@ -75,11 +75,7 @@ func (c *Controller) Start(iface string) error {
 		return fmt.Errorf("测试已在运行中（接口 %s）", c.iface)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	if err := c.startLocked(ctx, cancel, iface); err != nil {
-		cancel()
-		return err
-	}
-	return nil
+	return c.startWithRetryLocked(ctx, cancel, iface)
 }
 
 // Stop 停止当前测试并等待所有 goroutine 退出（socket/pcap 句柄释放）；未运行时无操作。
@@ -114,7 +110,12 @@ func (c *Controller) Restart() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	ctx, cancel := context.WithCancel(context.Background())
-	// Windows 上 UDP socket 关闭后端口可能延迟释放，bind 失败时重试
+	return c.startWithRetryLocked(ctx, cancel, iface)
+}
+
+// startWithRetryLocked 启动组件；Windows 上 UDP socket 关闭后端口可能延迟释放，
+// bind 失败时每 100ms 重试，最多 10 次（调用方必须持有锁）。
+func (c *Controller) startWithRetryLocked(ctx context.Context, cancel context.CancelFunc, iface string) error {
 	var err error
 	for i := 0; i < 10; i++ {
 		err = c.startLocked(ctx, cancel, iface)

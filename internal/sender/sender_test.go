@@ -69,3 +69,47 @@ func TestSenderPacingLocalhost(t *testing.T) {
 		t.Fatalf("txBytes = %d, 期望 [%d, %d]", tx, lo, hi)
 	}
 }
+
+// TestNewCleansUpOnPartialFailure 回归测试：部分流创建失败时，
+// 已创建 socket 的端口必须释放（否则下次启动 bind 失败）。
+func TestNewCleansUpOnPartialFailure(t *testing.T) {
+	// 占用一个端口，让第二条流 bind 失败
+	blocker, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Close()
+	blockedPort := blocker.LocalAddr().(*net.UDPAddr).Port
+
+	// 找一个空闲端口给 flow1
+	probe, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	freePort := probe.LocalAddr().(*net.UDPAddr).Port
+	probe.Close()
+
+	cfg := &config.Config{Flows: []config.Flow{
+		{Name: "f1", Protocol: "udp", SrcIP: "127.0.0.1", DstIP: "127.0.0.1",
+			SrcPort: freePort, DstPort: freePort + 100, DSCP: 46, RatePPS: 10, PayloadSize: 64},
+		{Name: "f2", Protocol: "udp", SrcIP: "127.0.0.1", DstIP: "127.0.0.1",
+			SrcPort: blockedPort, DstPort: blockedPort + 100, DSCP: 46, RatePPS: 10, PayloadSize: 64},
+	}}
+	agg := stats.NewAggregator(2, 10)
+	if _, err := New(cfg, agg); err == nil {
+		t.Fatal("第二条流应创建失败")
+	}
+	// 验证 flow1 的端口已被释放：1 秒内应能重新绑定
+	deadline := time.Now().Add(time.Second)
+	for {
+		c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: freePort})
+		if err == nil {
+			c.Close()
+			return // 端口已释放
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("flow1 的端口 %d 未释放: %v", freePort, err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
