@@ -21,9 +21,29 @@ type Capturer struct {
 	iface   string
 }
 
+// captureBufferSize 是 pcap 内核缓冲大小（64MB）。
+// Npcap 默认缓冲很小（约 1MB），高 pps 时抓包丢帧会造成 RX < TX 的假象。
+const captureBufferSize = 64 << 20
+
 // New 打开接口（Linux libpcap / Windows Npcap），snaplen 65535，混杂模式。
 func New(iface string, cfg *config.Config, agg *stats.Aggregator) (*Capturer, error) {
-	handle, err := pcap.OpenLive(iface, 65535, true, 100*time.Millisecond)
+	// 用 InactiveHandle 以便在激活前设置内核缓冲（OpenLive 激活后无法再改）
+	inactive, err := pcap.NewInactiveHandle(iface)
+	if err != nil {
+		if runtime.GOOS == "windows" {
+			return nil, fmt.Errorf("打开接口 %q 失败（Windows 需安装 Npcap: https://npcap.com）: %w", iface, err)
+		}
+		return nil, fmt.Errorf("打开接口 %q 失败: %w", iface, err)
+	}
+	defer inactive.CleanUp()
+	inactive.SetSnapLen(65535)
+	inactive.SetPromisc(true)
+	inactive.SetTimeout(100 * time.Millisecond)
+	if err := inactive.SetBufferSize(captureBufferSize); err != nil {
+		inactive.CleanUp()
+		return nil, fmt.Errorf("设置抓包缓冲失败: %w", err)
+	}
+	handle, err := inactive.Activate()
 	if err != nil {
 		if runtime.GOOS == "windows" {
 			return nil, fmt.Errorf("打开接口 %q 失败（Windows 需安装 Npcap: https://npcap.com）: %w", iface, err)

@@ -21,6 +21,7 @@ const (
 	sampleInterval = 100 * time.Millisecond
 	histCap        = 3000
 	logRowEvery    = 10 // 每 10 次采样（1s）写一行 CSV 日志
+	drainDelay     = 500 * time.Millisecond
 )
 
 // Mode 是运行模式，决定启动哪些组件。
@@ -49,20 +50,23 @@ type Controller struct {
 	mode    Mode
 	agg     *stats.Aggregator
 	lastAgg *stats.Aggregator // 上次运行的聚合器（停止后保留，供页面查看）
-	cancel  context.CancelFunc
-	iface   string
-	running bool
-	started time.Time
 
-	logDir  string // 日志根目录（其下建 logs/）；空=不记录
-	logFile *os.File
-	csvW    *csv.Writer
-	logPath string // 本次 CSV 日志路径
+	senderCancel  context.CancelFunc // 发送 goroutine 的取消（先停）
+	captureCancel context.CancelFunc // 接收 goroutine 的取消（后停）
+	iface         string
+	running       bool
+	started       time.Time
+
+	drainDelay time.Duration // 停止时：停发送后等待在途包被捕获的时长
+	logDir     string        // 日志根目录（其下建 logs/）；空=不记录
+	logFile    *os.File
+	csvW       *csv.Writer
+	logPath    string // 本次 CSV 日志路径
 }
 
 // New 创建控制器。
 func New(cfg *config.Config, mode Mode) *Controller {
-	return &Controller{cfg: cfg, mode: mode}
+	return &Controller{cfg: cfg, mode: mode, drainDelay: drainDelay}
 }
 
 // SetLogDir 启用统计日志：每次运行在 <dir>/logs/ 下生成
@@ -95,12 +99,12 @@ func (c *Controller) Start(iface string) error {
 	if c.running {
 		return fmt.Errorf("测试已在运行中（接口 %s）", c.iface)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	return c.startWithRetryLocked(ctx, cancel, iface)
+	return c.startWithRetryLocked(iface)
 }
 
-// Stop 停止当前测试并等待所有 goroutine 退出（socket/pcap 句柄释放）；
-// 停止后保留最后一份统计供页面查看，并写出汇总日志。未运行时无操作。
+// Stop 停止测试：先停发送，等待在途包被接收端捕获（drainDelay），
+// 再停接收并等待所有 goroutine 退出。停止后保留最后一份统计供页面查看，
+// 并写出汇总日志。未运行时无操作。
 func (c *Controller) Stop() {
 	c.mu.Lock()
 	if !c.running {
@@ -109,21 +113,32 @@ func (c *Controller) Stop() {
 	}
 	iface := c.iface
 	startedAt := c.started
-	c.cancel()
+	if c.senderCancel != nil {
+		c.senderCancel() // 1. 先停发送：不再产生新包
+	}
 	c.running = false
 	c.iface = ""
+	savedAgg := c.agg
 	c.lastAgg = c.agg // 保留最后数据，停止后页面仍可查看
 	c.agg = nil
+	c.started = time.Time{}
 	stopped := time.Now()
 	c.mu.Unlock()
-	c.wg.Wait() // 等待 goroutine 退出，确保端口/句柄已释放
+
+	// 2. 等待在途包被接收端捕获（发送已停，RX 追平 TX）
+	if c.captureCancel != nil {
+		time.Sleep(c.drainDelay)
+		c.captureCancel() // 3. 再停接收
+	}
+	c.wg.Wait() // 4. 等所有 goroutine 退出（socket/pcap 句柄释放）
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.closeLogLocked(c.lastAgg, startedAt, iface, stopped)
+	c.closeLogLocked(savedAgg, startedAt, iface, stopped)
 }
 
 // Restart 用当前配置在相同接口上重启测试；未运行时无操作。
+// 同样先停发送、延迟停接收，避免尾部差。
 func (c *Controller) Restart() error {
 	c.mu.Lock()
 	if !c.running {
@@ -133,24 +148,30 @@ func (c *Controller) Restart() error {
 	iface := c.iface
 	startedAt := c.started
 	oldAgg := c.agg
-	c.cancel()
+	if c.senderCancel != nil {
+		c.senderCancel()
+	}
 	c.running = false
 	c.mu.Unlock()
+
+	if c.captureCancel != nil {
+		time.Sleep(c.drainDelay)
+		c.captureCancel()
+	}
 	c.wg.Wait() // 等旧 goroutine 退出、句柄释放后再启动
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closeLogLocked(oldAgg, startedAt, iface, time.Now()) // 收尾上一轮日志
-	ctx, cancel := context.WithCancel(context.Background())
-	return c.startWithRetryLocked(ctx, cancel, iface)
+	return c.startWithRetryLocked(iface)
 }
 
 // startWithRetryLocked 启动组件；Windows 上 UDP socket 关闭后端口可能延迟释放，
 // bind 失败时每 100ms 重试，最多 10 次（调用方必须持有锁）。
-func (c *Controller) startWithRetryLocked(ctx context.Context, cancel context.CancelFunc, iface string) error {
+func (c *Controller) startWithRetryLocked(iface string) error {
 	var err error
 	for i := 0; i < 10; i++ {
-		err = c.startLocked(ctx, cancel, iface)
+		err = c.startLocked(iface)
 		if err == nil {
 			return nil
 		}
@@ -160,7 +181,6 @@ func (c *Controller) startWithRetryLocked(ctx context.Context, cancel context.Ca
 			c.mu.Lock()
 		}
 	}
-	cancel()
 	c.agg = nil
 	return err
 }
@@ -204,18 +224,25 @@ func (c *Controller) SetAggregatorForTest(agg *stats.Aggregator) {
 	defer c.mu.Unlock()
 	c.agg = agg
 	c.running = true
-	c.cancel = func() {} // no-op，避免 Restart 触发 nil 调用
+	c.senderCancel = func() {} // no-op，避免 Restart 触发 nil 调用
+	c.captureCancel = func() {}
 }
 
 // startLocked 启动组件（调用方必须持有锁且 running==false）。
-func (c *Controller) startLocked(ctx context.Context, cancel context.CancelFunc, iface string) error {
+func (c *Controller) startLocked(iface string) error {
 	agg := stats.NewAggregator(len(c.cfg.Flows), histCap)
+
+	// 发送与接收使用独立 ctx：停止时先取消发送，延迟后再取消接收
+	sCtx, sCancel := context.WithCancel(context.Background())
+	cCtx, cCancel := context.WithCancel(context.Background())
 
 	var s *sender.Sender
 	var err error
 	if c.mode != ModeRecv {
 		s, err = sender.New(c.cfg, agg)
 		if err != nil {
+			sCancel()
+			cCancel()
 			return err
 		}
 	}
@@ -226,12 +253,15 @@ func (c *Controller) startLocked(ctx context.Context, cancel context.CancelFunc,
 			if s != nil {
 				s.Close() // 清理已创建的 socket，避免泄漏
 			}
+			sCancel()
+			cCancel()
 			return err
 		}
 	}
 
-	c.agg, c.cancel, c.iface, c.running, c.started = agg, cancel, iface, true, time.Now()
+	c.agg, c.iface, c.running, c.started = agg, iface, true, time.Now()
 	c.lastAgg = nil // 新一轮测试开始，清掉上一轮数据
+	c.senderCancel, c.captureCancel = sCancel, cCancel
 	if c.logDir != "" {
 		c.openLogLocked(c.started) // 日志失败不阻塞测试
 	}
@@ -239,20 +269,20 @@ func (c *Controller) startLocked(ctx context.Context, cancel context.CancelFunc,
 		c.wg.Add(1)
 		go func() {
 			defer c.wg.Done()
-			s.Run(ctx)
+			s.Run(sCtx)
 		}()
 	}
 	if cap != nil {
 		c.wg.Add(1)
 		go func() {
 			defer c.wg.Done()
-			cap.Run(ctx)
+			cap.Run(cCtx)
 		}()
 	}
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
-		c.sampleLoop(ctx, agg)
+		c.sampleLoop(cCtx, agg) // 采样循环跟随接收，最后收尾
 	}()
 	return nil
 }

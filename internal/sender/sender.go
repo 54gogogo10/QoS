@@ -18,7 +18,7 @@ import (
 const (
 	// spinBudget 是等待的最后阶段用忙等校准的时长上限；
 	// Windows 上 <1ms 的 Sleep 不可靠（系统定时器粒度），只有 spin 能到 µs 级精度。
-	spinBudget = 300 * time.Microsecond
+	spinBudget = 100 * time.Microsecond
 	// batchTarget 是精细批量的目标组时长：>1000pps 时按组发送，组内突发 ≤500µs。
 	batchTarget = 500 * time.Microsecond
 )
