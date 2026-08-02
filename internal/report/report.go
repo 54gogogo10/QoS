@@ -45,17 +45,31 @@ func Table(cfg *config.Config, snap []stats.FlowSnapshot, haveSender, haveCaptur
 	return b.String()
 }
 
+// tailDiff 返回停止瞬间未确认的尾部包数：发送已发出、接收未确认（含在途包）。
+// seq 跳号检测只能发现已收到包之间的空洞，末尾缺失必须靠 TX-RX 差值补全。
+func tailDiff(s stats.FlowSnapshot) uint64 {
+	if s.TxPackets > s.RxPackets+s.Lost {
+		return s.TxPackets - s.RxPackets - s.Lost
+	}
+	return 0
+}
+
 // Summary 渲染运行结束后的汇总报告。
+// 丢包列 = seq 空洞丢包 + 尾部差（收发不一致如实呈现）。
 func Summary(cfg *config.Config, snap []stats.FlowSnapshot, txTotal, rxTotal, lost uint64) string {
 	var b strings.Builder
 	b.WriteString("========== 汇总报告 ==========\n")
 	b.WriteString(fmt.Sprintf("%-14s %-8s %14s %14s %14s %14s %10s\n",
-		"流", "DSCP", "TX 包", "TX 字节", "RX 包", "RX 字节", "丢包"))
+		"流", "DSCP", "TX 包", "TX 字节", "RX 包", "RX 字节", "丢包*"))
+	var totalLost uint64
 	for i, f := range cfg.Flows {
 		s := snap[i]
+		l := s.Lost + tailDiff(s)
+		totalLost += l
 		b.WriteString(fmt.Sprintf("%-14s %-8s %14d %14d %14d %14d %10d\n",
-			f.Name, dscpStr(f.DSCP), s.TxPackets, s.TxBytes, s.RxPackets, s.RxBytes, s.Lost))
+			f.Name, dscpStr(f.DSCP), s.TxPackets, s.TxBytes, s.RxPackets, s.RxBytes, l))
 	}
-	b.WriteString(fmt.Sprintf("总发送 %d 字节, 总接收 %d 字节, 总丢失 %d 包\n", txTotal, rxTotal, lost))
+	b.WriteString(fmt.Sprintf("总发送 %d 字节, 总接收 %d 字节, 总丢失 %d 包\n", txTotal, rxTotal, totalLost))
+	b.WriteString("* 丢包 = seq 空洞丢失 + 停止瞬间未确认的尾部差（TX−RX−空洞丢失）\n")
 	return b.String()
 }

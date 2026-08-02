@@ -95,3 +95,25 @@ func TestTableEightRows(t *testing.T) {
 		t.Fatalf("行数 = %d, want 9:\n%s", strings.Count(out, "\n"), out)
 	}
 }
+
+// TestSummaryTailDiff 回归：收发不一致必须反映在丢包列（尾部差补全）。
+func TestSummaryTailDiff(t *testing.T) {
+	// TX 1000, RX 998, seq 空洞 0 → 丢包应显示 2
+	snap := []stats.FlowSnapshot{{
+		FlowIdx: 0, TxPackets: 1000, TxBytes: 1e6,
+		RxPackets: 998, RxBytes: 998000, Lost: 0,
+	}}
+	out := Summary(testCfg(), snap, 1e6, 998000, 0)
+	if !strings.Contains(out, "2\n") && !strings.Contains(out, "         2\n") {
+		t.Fatalf("尾部差未计入丢包:\n%s", out)
+	}
+	// 完全一致 → 丢包 0
+	snap2 := []stats.FlowSnapshot{{
+		FlowIdx: 0, TxPackets: 1000, TxBytes: 1e6,
+		RxPackets: 1000, RxBytes: 1e6, Lost: 0,
+	}}
+	out2 := Summary(testCfg(), snap2, 1e6, 1e6, 0)
+	if !strings.Contains(out2, "0\n") || !strings.Contains(out2, "* 丢包 = seq 空洞丢失") {
+		t.Fatalf("一致时丢包应为 0 且含口径说明:\n%s", out2)
+	}
+}

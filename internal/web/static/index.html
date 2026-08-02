@@ -330,20 +330,28 @@ function drawChart(hist) {
 
 // ---------- 统计表格 ----------
 
-function renderTable(flows) {
+function renderTable(flows, running) {
   const tbody = $('statsBody');
   tbody.innerHTML = '';
   const fmt = v => v >= 1e9 ? (v/1e9).toFixed(2)+'G' : v >= 1e6 ? (v/1e6).toFixed(2)+'M'
              : v >= 1e3 ? (v/1e3).toFixed(2)+'K' : v;
   for (const f of flows) {
+    // 停止后：丢包 = seq 空洞 + 尾部差（发送已发出、接收未确认），如实反映收发不一致；
+    // 运行中保持 seq 口径（RX 天然滞后于 TX，属正常管道延迟）。
+    let lost = f.lost;
+    let lossRate = f.loss_rate;
+    if (!running) {
+      lost += Math.max(0, f.tx_packets - f.rx_packets - f.lost);
+      lossRate = f.tx_packets > 0 ? lost / f.tx_packets : 0;
+    }
     const tr = document.createElement('tr');
-    if (f.loss_rate > 0) tr.className = 'loss';
+    if (lossRate > 0) tr.className = 'loss';
     tr.innerHTML =
       `<td>${esc(f.name)}</td><td>${f.dscp}</td><td>${f.src_ip}:${f.src_port}->${f.dst_ip}:${f.dst_port}</td>` +
       `<td>${(f.tx_bps*8/1e6).toFixed(2)}</td><td>${f.tx_pps.toFixed(0)}</td>` +
       `<td>${(f.rx_bps*8/1e6).toFixed(2)}</td><td>${f.rx_pps.toFixed(0)}</td>` +
       `<td>${fmt(f.tx_packets)}</td><td>${fmt(f.rx_packets)}</td>` +
-      `<td>${fmt(f.lost)}</td><td>${(f.loss_rate*100).toFixed(2)}%</td>`;
+      `<td>${fmt(lost)}</td><td>${(lossRate*100).toFixed(2)}%</td>`;
     tbody.appendChild(tr);
   }
 }
@@ -359,7 +367,7 @@ async function tick() {
     lastStats = d;
     document.getElementById('clock').textContent = new Date(d.now).toLocaleTimeString();
     drawChart(d.history);
-    renderTable(d.flows);
+    renderTable(d.flows, d.running);
   } catch (e) { /* 服务未就绪 */ }
   setTimeout(tick, 500);
 }
