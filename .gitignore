@@ -3,3 +3,4 @@ qostool.exe
 *.test
 dist/qostool-v1.0.0-win64.zip
 dist/qostool-v1.0.0/
+dist/
