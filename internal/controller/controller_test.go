@@ -61,8 +61,8 @@ func TestSendModeStartStop(t *testing.T) {
 	if c.Status().Running {
 		t.Fatal("停止后不应运行")
 	}
-	if c.Aggregator() != nil {
-		t.Fatal("停止后聚合器应清空")
+	if c.Aggregator() == nil {
+		t.Fatal("停止后聚合器应保留（供页面查看上次数据）")
 	}
 }
 
