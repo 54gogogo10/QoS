@@ -42,8 +42,8 @@ function resize() {
 function drawChart(hist) {
   resize();
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  const W = canvas.width, H = canvas.height;
+  const W = canvas.width / devicePixelRatio, H = canvas.height / devicePixelRatio;
+  ctx.clearRect(0, 0, W, H);
   const n = Math.min(hist.t.length, WINDOW);
   if (n < 2) return;
   let max = 1;
