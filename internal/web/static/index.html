@@ -119,7 +119,8 @@ async function loadInterfaces(select) {
     for (const d of devs) {
       const opt = document.createElement('option');
       opt.value = d.name;
-      opt.textContent = d.description ? d.description + '  [' + d.name + ']' : d.name;
+      const ips = (d.addresses || []).join(', ');
+      opt.textContent = (d.description ? d.description : d.name) + (ips ? '  [' + ips + ']' : '');
       sel.appendChild(opt);
     }
     if (prev) sel.value = prev;

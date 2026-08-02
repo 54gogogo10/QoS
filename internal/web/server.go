@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gopacket/gopacket/pcap"
@@ -232,12 +233,19 @@ func (s *Server) handleInterfaces(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type apiIface struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
+		Name        string   `json:"name"`
+		Description string   `json:"description"`
+		Addresses   []string `json:"addresses"`
 	}
 	out := make([]apiIface, 0, len(devs))
 	for _, d := range devs {
-		out = append(out, apiIface{Name: d.Name, Description: d.Description})
+		addrs := make([]string, 0, len(d.Addresses))
+		for _, a := range d.Addresses {
+			if a.IP != nil && a.IP.String() != "0.0.0.0" && a.IP.String() != "::" {
+				addrs = append(addrs, a.IP.String())
+			}
+		}
+		out = append(out, apiIface{Name: d.Name, Description: d.Description, Addresses: addrs})
 	}
 	writeJSON(w, out)
 }
@@ -300,6 +308,16 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "缺少 iface 参数")
 		return
 	}
+	// 诊断：回环配置 + 非回环接口 → 必然收不到流量，提前给出明确提示
+	if !isLoopbackIface(in.Iface) {
+		for _, f := range s.ctrl.Config().Flows {
+			if isLoopbackIP(f.SrcIP) || isLoopbackIP(f.DstIP) {
+				writeJSONError(w, http.StatusBadRequest,
+					"配置的流量目标是回环地址（"+f.SrcIP+"→"+f.DstIP+"），但所选接口 "+in.Iface+" 不是 Npcap 回环适配器，收不到流量。\n请选择 'Adapter for loopback traffic capture'（NPF_Loopback），或把配置改成实际 IP")
+				return
+			}
+		}
+	}
 	if err := s.ctrl.Start(in.Iface); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
@@ -342,6 +360,15 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
+}
+
+func isLoopbackIface(name string) bool {
+	l := strings.ToLower(name)
+	return strings.Contains(l, "loopback")
+}
+
+func isLoopbackIP(ip string) bool {
+	return ip == "127.0.0.1" || ip == "::1" || strings.HasPrefix(ip, "127.")
 }
 
 // writeJSONError 以 JSON 格式返回错误（前端可直接读取 error 字段）。
