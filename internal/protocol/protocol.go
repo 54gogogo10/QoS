@@ -9,7 +9,7 @@ const (
 	HeaderSize = 10
 )
 
-// EncodeHeader 把 flowID/seq 写入 payload 前 8 字节。
+// EncodeHeader 把 flowID/seq 写入 payload 前 10 字节。
 func EncodeHeader(payload []byte, flowID uint16, seq uint32) {
 	binary.BigEndian.PutUint32(payload[0:4], Magic)
 	binary.BigEndian.PutUint16(payload[4:6], flowID)

@@ -3,6 +3,7 @@
 package sender
 
 import (
+	"fmt"
 	"net"
 	"syscall"
 )
@@ -26,7 +27,9 @@ func setDSCP(conn *net.UDPConn, dscp int) error {
 		if conn.LocalAddr().(*net.UDPAddr).IP.To4() != nil {
 			serr = syscall.SetsockoptInt(syscall.Handle(fd), ipProtoIP, ipTOS, dscp<<2)
 		} else {
-			serr = syscall.SetsockoptInt(syscall.Handle(fd), ipProtoIPv6, ipv6TCLASS, dscp<<2)
+			// Windows 不支持 IPV6_TCLASS（WSAENOPROTOOPT）；IPV6_ECN 只能设 ECN 位，
+			// 无法携带 DSCP，因此 IPv6 下直接报错，请使用 IPv4 或 Linux。
+			serr = fmt.Errorf("Windows 不支持 IPv6 DSCP 标记（IPV6_TCLASS 不可用），请使用 IPv4 或 Linux")
 		}
 	})
 	if err != nil {

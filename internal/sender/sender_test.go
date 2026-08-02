@@ -11,7 +11,7 @@ import (
 	"qostool/internal/stats"
 )
 
-// TestSenderPacingLocalhost 用本地 UDP socket 接收，验证 1s 内发包数 ≈ 1000 (±15%)。
+// TestSenderPacingLocalhost 用本地 UDP socket 接收，验证 1s 内发包数 ≈ 1100 (±25%)。
 func TestSenderPacingLocalhost(t *testing.T) {
 	rcv, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
@@ -63,8 +63,8 @@ func TestSenderPacingLocalhost(t *testing.T) {
 		t.Fatalf("收到 %d 包, 期望 ~1100 (±25%%)", pkts)
 	}
 	tx, _, _ := agg.Totals()
-	lo := uint64(825) * uint64(10+64)
-	hi := uint64(1375) * uint64(10+64)
+	lo := uint64(825) * uint64(protocol.HeaderSize+64)
+	hi := uint64(1375) * uint64(protocol.HeaderSize+64)
 	if tx < lo || tx > hi {
 		t.Fatalf("txBytes = %d, 期望 [%d, %d]", tx, lo, hi)
 	}
