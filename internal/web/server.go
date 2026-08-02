@@ -66,10 +66,11 @@ type apiHistory struct {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
-	snap := s.agg.Current(time.Now())
+	now := time.Now()
+	snap := s.agg.Current(now)
 	hist := s.agg.History()
 	out := apiStats{
-		Now:     time.Now().UnixMilli(),
+		Now:     now.UnixMilli(),
 		Flows:   make([]apiFlow, len(snap)),
 		History: apiHistory{T: hist.T, Tx: hist.TxB, Rx: hist.RxB},
 	}

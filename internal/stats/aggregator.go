@@ -9,9 +9,9 @@ import (
 // FlowSnapshot 是一条流的实时统计快照。
 type FlowSnapshot struct {
 	FlowIdx   int
-	TxBps     float64
+	TxBps     float64 // TxBps 字节/秒
 	TxPps     float64
-	RxBps     float64
+	RxBps     float64 // RxBps 字节/秒
 	RxPps     float64
 	TxPackets uint64
 	TxBytes   uint64
@@ -21,7 +21,7 @@ type FlowSnapshot struct {
 	LossRate  float64 // 0..1
 }
 
-// History 是 Web 图表用的历史序列（并行数组，单位 bps）。
+// History 是 Web 图表用的历史序列（并行数组，单位 字节/秒）。
 type History struct {
 	T   []int64     // unix 毫秒
 	TxB [][]float64 // [flow][point]
