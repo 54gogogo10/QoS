@@ -3,10 +3,10 @@ package protocol
 
 import "encoding/binary"
 
-// 载荷头格式：[magic 4B][flow_id 2B][seq 4B]
+// 载荷头格式：[magic 4B][flow_id 2B][seq 4B]，总长 10 字节
 const (
 	Magic      = 0x514F5354 // "QOST"
-	HeaderSize = 8
+	HeaderSize = 10
 )
 
 // EncodeHeader 把 flowID/seq 写入 payload 前 8 字节。

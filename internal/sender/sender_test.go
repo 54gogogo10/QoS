@@ -63,8 +63,8 @@ func TestSenderPacingLocalhost(t *testing.T) {
 		t.Fatalf("收到 %d 包, 期望 ~1100 (±25%%)", pkts)
 	}
 	tx, _, _ := agg.Totals()
-	lo := uint64(825) * uint64(8+64)
-	hi := uint64(1375) * uint64(8+64)
+	lo := uint64(825) * uint64(10+64)
+	hi := uint64(1375) * uint64(10+64)
 	if tx < lo || tx > hi {
 		t.Fatalf("txBytes = %d, 期望 [%d, %d]", tx, lo, hi)
 	}
