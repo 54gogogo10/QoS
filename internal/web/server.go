@@ -2,6 +2,7 @@
 package web
 
 import (
+	"context"
 	"embed"
 	"encoding/json"
 	"net/http"
@@ -18,6 +19,7 @@ var staticFS embed.FS
 type Server struct {
 	cfg *config.Config
 	agg *stats.Aggregator
+	srv *http.Server
 }
 
 // New 创建 Web 服务。
@@ -30,7 +32,16 @@ func (s *Server) ListenAndServe(addr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/", s.handleIndex)
-	return http.ListenAndServe(addr, mux)
+	s.srv = &http.Server{Addr: addr, Handler: mux}
+	return s.srv.ListenAndServe()
+}
+
+// Shutdown 优雅停止 HTTP 服务。
+func (s *Server) Shutdown(ctx context.Context) error {
+	if s.srv == nil {
+		return nil
+	}
+	return s.srv.Shutdown(ctx)
 }
 
 type apiStats struct {

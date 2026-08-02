@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -112,16 +114,23 @@ func run(mode string, args []string) error {
 		}()
 	}
 
+	var srv *web.Server
 	if *webPort != "off" {
-		srv := web.New(cfg, agg)
+		srv = web.New(cfg, agg)
 		go func() {
-			if err := srv.ListenAndServe(":" + *webPort); err != nil {
+			if err := srv.ListenAndServe(":" + *webPort); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				fmt.Fprintf(os.Stderr, "Web 服务错误 (端口被占可换 --web 端口): %v\n", err)
 			}
 		}()
 	}
 
 	reportLoop(ctx, cfg, agg, haveSender, haveCapture, capErrCh, time.Duration(*interval)*time.Millisecond)
+
+	if srv != nil {
+		sc, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		srv.Shutdown(sc)
+		cancel()
+	}
 
 	snap := agg.Current(time.Now())
 	txTotal, rxTotal, lost := agg.Totals()
