@@ -39,10 +39,10 @@ func New(iface string, cfg *config.Config, agg *stats.Aggregator) (*Capturer, er
 
 // Run 阻塞抓包直到 ctx 取消；接口故障时返回错误。
 func (c *Capturer) Run(ctx context.Context) error {
+	defer c.handle.Close()
 	for {
 		select {
 		case <-ctx.Done():
-			c.handle.Close()
 			return nil
 		default:
 		}
