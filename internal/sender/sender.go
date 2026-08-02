@@ -14,7 +14,7 @@ import (
 	"qostool/internal/stats"
 )
 
-const defaultTick = 10 * time.Millisecond
+const defaultTick = 2 * time.Millisecond
 
 // Sender 管理全部流的发送 goroutine。
 type Sender struct {
@@ -94,16 +94,30 @@ func newFlow(idx int, cfg config.Flow, agg *stats.Aggregator) (*flow, error) {
 	}, nil
 }
 
-// run 按绝对时间点调度：每 10ms 批量发送本轮配额。
+// run 按绝对时间点调度：每 defaultTick（2ms）批量发送本轮配额。
+// timer 复用避免每 tick 分配；Windows 定时器精度由 timeBeginPeriod(1) 保证。
 func (f *flow) run(ctx context.Context) {
 	next := time.Now()
+	timer := time.NewTimer(defaultTick)
+	defer func() {
+		timer.Stop()
+		f.conn.Close()
+	}()
 	for {
 		next = next.Add(defaultTick)
-		timer := time.NewTimer(time.Until(next))
+		d := time.Until(next)
+		if d < 0 {
+			d = 0
+		}
+		if !timer.Stop() { // 排空已触发但未读的值，避免 Reset 后立即误触发
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+		timer.Reset(d)
 		select {
 		case <-ctx.Done():
-			timer.Stop()
-			f.conn.Close()
 			return
 		case <-timer.C:
 		}
