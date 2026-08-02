@@ -274,17 +274,29 @@ function drawChart(hist) {
   ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
   const W = canvas.width / devicePixelRatio, H = canvas.height / devicePixelRatio;
   ctx.clearRect(0, 0, W, H);
-  const n = Math.min(hist.t.length, WINDOW);
-  if (n < 2) {
+  // 聚合：10 × 100ms = 1s 一个点（包离散在 100ms 窗口有 ±1 包物理抖动，聚合后曲线平滑）
+  const AGG = 10;
+  const aggN = Math.floor(hist.t.length / AGG);
+  if (aggN < 2) {
     ctx.fillStyle = "#666"; ctx.font = "13px sans-serif";
     ctx.fillText("暂无数据（开始测试后显示曲线）", W/2 - 110, H/2);
     return;
   }
+  const t = new Array(aggN), txs = [], rxs = [];
+  for (let f = 0; f < hist.tx.length; f++) { txs.push(new Array(aggN)); rxs.push(new Array(aggN)); }
+  for (let i = 0; i < aggN; i++) {
+    t[i] = hist.t[i * AGG + AGG - 1];
+    for (let f = 0; f < hist.tx.length; f++) {
+      let s1 = 0, s2 = 0;
+      for (let j = 0; j < AGG; j++) { s1 += hist.tx[f][i*AGG+j]; s2 += hist.rx[f][i*AGG+j]; }
+      txs[f][i] = s1 / AGG; rxs[f][i] = s2 / AGG;
+    }
+  }
+  const n = Math.min(t.length, WINDOW);
   let max = 1;
-  for (let f = 0; f < hist.tx.length; f++) {
-    const tx = hist.tx[f], rx = hist.rx[f];
-    for (let i = tx.length - n; i < tx.length; i++) {
-      max = Math.max(max, tx[i], rx[i]);
+  for (let f = 0; f < txs.length; f++) {
+    for (let i = txs[f].length - n; i < txs[f].length; i++) {
+      max = Math.max(max, txs[f][i], rxs[f][i]);
     }
   }
   ctx.strokeStyle = "#333"; ctx.lineWidth = 1;
@@ -307,9 +319,9 @@ function drawChart(hist) {
     ctx.stroke();
     ctx.setLineDash([]);
   };
-  for (let f = 0; f < hist.tx.length; f++) {
-    plot(hist.tx[f].slice(-n), COLORS[f % 8], []);
-    plot(hist.rx[f].slice(-n), COLORS[f % 8], [4, 3]);
+  for (let f = 0; f < txs.length; f++) {
+    plot(txs[f].slice(-n), COLORS[f % 8], []);
+    plot(rxs[f].slice(-n), COLORS[f % 8], [4, 3]);
   }
 }
 

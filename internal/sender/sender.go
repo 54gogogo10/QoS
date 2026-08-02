@@ -14,7 +14,14 @@ import (
 	"qostool/internal/stats"
 )
 
-const defaultTick = 2 * time.Millisecond
+// pacing 参数
+const (
+	// spinBudget 是等待的最后阶段用忙等校准的时长上限；
+	// Windows 上 <1ms 的 Sleep 不可靠（系统定时器粒度），只有 spin 能到 µs 级精度。
+	spinBudget = 300 * time.Microsecond
+	// batchTarget 是精细批量的目标组时长：>1000pps 时按组发送，组内突发 ≤500µs。
+	batchTarget = 500 * time.Microsecond
+)
 
 // Sender 管理全部流的发送 goroutine。
 type Sender struct {
@@ -60,11 +67,14 @@ func (s *Sender) Close() {
 type flow struct {
 	idx          int
 	conn         *net.UDPConn
-	bucket       *bucket
 	payload      []byte
 	seq          uint32
 	agg          *stats.Aggregator
 	wireOverhead int
+	packetIPSize int // IP 层包长（计入字节速率）
+	interval     time.Duration
+	batch        int           // 每批包数（interval < batchTarget 时 >1）
+	batchGap     time.Duration // 批间隔 = interval * batch
 }
 
 func newFlow(idx int, cfg config.Flow, agg *stats.Aggregator) (*flow, error) {
@@ -84,53 +94,87 @@ func newFlow(idx int, cfg config.Flow, agg *stats.Aggregator) (*flow, error) {
 	if net.ParseIP(cfg.SrcIP).To4() == nil {
 		wireOverhead = 48 // IPv6: 40 IP + 8 UDP
 	}
-	return &flow{
+	f := &flow{
 		idx:          idx,
 		conn:         conn,
-		bucket:       newBucket(cfg.RateMbps, cfg.RatePPS, defaultTick),
 		payload:      payload,
 		agg:          agg,
 		wireOverhead: wireOverhead,
-	}, nil
+		packetIPSize: len(payload) + wireOverhead,
+	}
+	f.computePacing(cfg)
+	return f, nil
 }
 
-// run 按绝对时间点调度：每 defaultTick（2ms）批量发送本轮配额。
-// timer 复用避免每 tick 分配；Windows 定时器精度由 timeBeginPeriod(1) 保证。
+// computePacing 根据双速率参数计算包间隔：
+// 取 pps 与字节速率（Mbps→IP 字节/秒）两者中较慢者。
+func (f *flow) computePacing(cfg config.Flow) {
+	pps := cfg.RatePPS
+	if bps := cfg.RateMbps * 1e6 / 8; bps > 0 {
+		ppsFromBytes := bps / float64(f.packetIPSize)
+		if pps == 0 || ppsFromBytes < pps {
+			pps = ppsFromBytes
+		}
+	}
+	if pps <= 0 {
+		pps = 1
+	}
+	f.interval = time.Duration(float64(time.Second) / pps)
+	if f.interval <= 0 {
+		f.interval = time.Nanosecond
+	}
+	// 间隔小于 batchTarget 时按批发送：组内突发不超过 batchTarget
+	f.batch = 1
+	if f.interval < batchTarget {
+		f.batch = int(batchTarget/f.interval) + 1
+		if f.batch < 1 {
+			f.batch = 1
+		}
+	}
+	f.batchGap = f.interval * time.Duration(f.batch)
+}
+
+// run 包级精确调度：按绝对时刻逐包（或小批量）发送，杜绝累积漂移。
 func (f *flow) run(ctx context.Context) {
+	defer f.conn.Close()
 	next := time.Now()
-	timer := time.NewTimer(defaultTick)
-	defer func() {
-		timer.Stop()
-		f.conn.Close()
-	}()
 	for {
-		next = next.Add(defaultTick)
-		d := time.Until(next)
-		if d < 0 {
-			d = 0
-		}
-		if !timer.Stop() { // 排空已触发但未读的值，避免 Reset 后立即误触发
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-		timer.Reset(d)
-		select {
-		case <-ctx.Done():
+		next = next.Add(f.batchGap)
+		if !waitUntil(ctx, next) {
 			return
-		case <-timer.C:
 		}
-		n := f.bucket.take(time.Now(), len(f.payload))
-		for i := 0; i < n; i++ {
+		for i := 0; i < f.batch; i++ {
 			f.seq++
 			binary.BigEndian.PutUint32(f.payload[protocol.HeaderSize-4:protocol.HeaderSize], f.seq)
 			if _, err := f.conn.Write(f.payload); err != nil {
 				return // 对端不可达等错误：停止该流
 			}
 		}
-		if n > 0 {
-			f.agg.RecordTx(f.idx, uint64(n), uint64(n*(len(f.payload)+f.wireOverhead)))
+		f.agg.RecordTx(f.idx, uint64(f.batch), uint64(f.batch*(len(f.payload)+f.wireOverhead)))
+	}
+}
+
+// waitUntil 高精度等待到时刻 t：
+// 剩余大于 spinBudget 时用 Sleep（留出 spin 余量，避免睡过头），
+// 最后 spinBudget 时段忙等校准到期（µs 级精度）。
+// 返回 false 表示 ctx 已取消。
+func waitUntil(ctx context.Context, t time.Time) bool {
+	for {
+		d := time.Until(t)
+		if d <= 0 {
+			return ctx.Err() == nil
 		}
+		if d > spinBudget {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(d - spinBudget):
+			}
+			continue
+		}
+		// 最后 spinBudget：忙等校准
+		for time.Until(t) > 0 {
+		}
+		return ctx.Err() == nil
 	}
 }
