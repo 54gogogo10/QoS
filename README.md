@@ -43,7 +43,7 @@ Web 页面：浏览器打开 `http://<本机IP>:16666`，实时曲线 + 表格�
 - 发送仅支持 UDP；IPv6 扩展头不支持（本工具不产生）
 - Windows 上抓环回（127.0.0.1）流量需安装并启用 **Npcap Loopback Adapter**（Npcap 安装时勾选 "Support loopback traffic"），
   且 `-i` 参数须用 `qostool lsdev` 列出的适配器名
-- 丢包检测基于 seq 跳号，不处理乱序重排；seq 回绕（约 49 天 @100k pps）后不计丢包
+- 丢包检测基于 seq 跳号，不处理乱序重排；seq 回绕（约 12 小时 @100k pps）后不计丢包
 
 ## 测试
 
