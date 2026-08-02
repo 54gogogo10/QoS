@@ -47,6 +47,34 @@ func TestTableNoCapture(t *testing.T) {
 	}
 }
 
+func TestTableNoSender(t *testing.T) {
+	// 无发送端：TX 两列显示 -，RX 列与丢包率正常
+	out := Table(testCfg(), testSnap(1.25e6, 1.25e6, 1000, 900, 100), false, true)
+	if strings.Count(out, "10.00") != 2 { // RX Mbps 与丢包率 10.00% 各含一处
+		t.Fatalf("RX Mbps 与丢包率应显示 10.00:\n%s", out)
+	}
+	if strings.Count(out, "1250") != 1 {
+		t.Fatalf("RX pps 应显示 1250:\n%s", out)
+	}
+	// 剔除流名连字符与 5 元组 "->" 后，仅剩 TX Mbps/TX pps 两个 "-"
+	body := strings.NewReplacer("EF-语音", "", "->", "").Replace(out)
+	if strings.Count(body, "-") != 2 {
+		t.Fatalf("无发送端时 TX Mbps/TX pps 应为 -:\n%s", out)
+	}
+}
+
+func TestTableNoRxPackets(t *testing.T) {
+	// 全部 RX 为零：RX 两列与丢包率显示 -，丢包率不显示百分比
+	out := Table(testCfg(), testSnap(1.25e6, 0, 1000, 0, 0), true, true)
+	body := strings.NewReplacer("EF-语音", "", "->", "").Replace(out)
+	if strings.Count(body, "-") != 3 {
+		t.Fatalf("RX Mbps/RX pps/丢包率 应为 -:\n%s", out)
+	}
+	if strings.Contains(out, "10.00%") {
+		t.Fatalf("无 RX 数据时丢包率应为 -:\n%s", out)
+	}
+}
+
 func TestSummary(t *testing.T) {
 	out := Summary(testCfg(), testSnap(1e6, 1e6, 1000, 900, 100), 1e6, 9e5, 100)
 	for _, want := range []string{"汇总", "1000", "900", "100"} {
