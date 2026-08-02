@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -58,4 +59,28 @@ func (d *DSCP) UnmarshalYAML(node *yaml.Node) error {
 // Name 返回数值对应的常用名字，未知返回空串。
 func (d DSCP) Name() string {
 	return dscpNamesByValue[int(d)]
+}
+
+// ParseDSCP 解析用户输入：0-63 的数字或名字（EF/AF41/CS7 等，大小写不敏感）。
+func ParseDSCP(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	if v, ok := dscpNames[strings.ToUpper(s)]; ok {
+		return v, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("DSCP 必须是 0-63 的数字或已知名字（如 EF、AF41、CS7）")
+	}
+	if n < 0 || n > 63 {
+		return 0, fmt.Errorf("DSCP %d 超出范围 0-63", n)
+	}
+	return n, nil
+}
+
+// MarshalYAML 序列化为常用名字（如 EF），未知值输出数字。
+func (d DSCP) MarshalYAML() (interface{}, error) {
+	if n := dscpNamesByValue[int(d)]; n != "" {
+		return n, nil
+	}
+	return int(d), nil
 }

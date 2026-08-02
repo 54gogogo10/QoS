@@ -2,37 +2,237 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<title>qostool 实时监控</title>
+<title>qostool QoS 测试工具</title>
 <style>
-  body { font-family: "Microsoft YaHei", sans-serif; background:#111; color:#ddd; margin:16px; }
-  h1 { font-size:18px; }
-  #chart { width:100%; height:320px; background:#1a1a1a; }
-  table { border-collapse:collapse; width:100%; margin-top:12px; font-size:13px; }
-  th, td { border:1px solid #333; padding:4px 8px; text-align:right; }
-  th { background:#222; }
-  td:first-child, th:first-child { text-align:left; }
-  tr.loss td { color:#ff5555; }
-  .legend span { display:inline-block; margin-right:14px; font-size:12px; }
-  .sw { display:inline-block; width:10px; height:10px; margin-right:4px; }
+  :root { --bg:#111; --panel:#1a1a1a; --border:#333; --fg:#ddd; --accent:#4a9eff; --red:#ff5555; }
+  * { box-sizing: border-box; }
+  body { font-family: "Microsoft YaHei", sans-serif; background:var(--bg); color:var(--fg); margin:0; padding:12px 16px; }
+  h1 { font-size:17px; margin:0; display:inline; }
+  .header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
+  .badge { font-size:12px; padding:2px 10px; border-radius:10px; background:#333; }
+  .badge.running { background:#1e5e1e; color:#7dff7d; }
+  .badge.stopped { background:#5e1e1e; color:#ff7d7d; }
+  select, input, button { font-size:13px; background:#222; color:var(--fg); border:1px solid var(--border); padding:4px 8px; border-radius:4px; }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button:disabled { opacity:.45; cursor:default; }
+  button.primary { background:var(--accent); color:#fff; border:none; padding:5px 18px; font-size:14px; }
+  button.stop { background:#a33; color:#fff; border:none; padding:5px 18px; font-size:14px; }
+  .panel { background:var(--panel); border:1px solid var(--border); border-radius:6px; padding:10px 12px; margin-bottom:10px; }
+  .panel h2 { font-size:14px; margin:0 0 8px; color:#aaa; font-weight:normal; }
+  .cfg-table { width:100%; border-collapse:collapse; font-size:12px; }
+  .cfg-table th, .cfg-table td { border:1px solid var(--border); padding:3px 5px; text-align:center; }
+  .cfg-table th { background:#222; font-weight:normal; }
+  .cfg-table input { width:100%; min-width:52px; padding:2px 4px; border:1px solid transparent; background:transparent; text-align:center; }
+  .cfg-table input:focus { border-color:var(--accent); background:#1c1c1c; }
+  .cfg-table td.name { width:90px; }
+  .cfg-table td.ip { width:105px; }
+  .cfg-table td.num { width:62px; }
+  .cfg-table td.dscp { width:64px; }
+  #chart { width:100%; height:300px; background:#161616; border:1px solid var(--border); border-radius:4px; }
+  .legend { margin:6px 0; font-size:12px; }
+  .legend span { display:inline-block; margin-right:12px; }
+  .sw { display:inline-block; width:10px; height:10px; margin-right:4px; vertical-align:middle; }
+  table.stats { border-collapse:collapse; width:100%; margin-top:8px; font-size:12px; }
+  table.stats th, table.stats td { border:1px solid var(--border); padding:3px 8px; text-align:right; }
+  table.stats th { background:#222; }
+  table.stats td:first-child, table.stats th:first-child { text-align:left; }
+  tr.loss td { color:var(--red); }
+  #msg { font-size:13px; min-height:18px; margin:6px 0 0; }
+  #msg.err { color:var(--red); }
+  #msg.ok { color:#7dff7d; }
+  .row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .hint { font-size:12px; color:#888; }
 </style>
 </head>
 <body>
-<h1>qostool QoS 实时监控 <span id="clock"></span></h1>
-<div class="legend" id="legend"></div>
-<canvas id="chart"></canvas>
-<table id="tbl">
-<thead><tr>
-  <th>流</th><th>DSCP</th><th>5元组</th>
-  <th>TX Mbps</th><th>TX pps</th><th>RX Mbps</th><th>RX pps</th>
-  <th>TX 包</th><th>RX 包</th><th>丢失</th><th>丢包率</th>
-</tr></thead>
-<tbody></tbody>
-</table>
+
+<div class="header">
+  <h1>qostool QoS 测试工具</h1>
+  <span class="badge stopped" id="badge">未运行</span>
+  <span id="clock" class="hint"></span>
+</div>
+
+<div class="panel">
+  <div class="row">
+    <label>监听接口</label>
+    <select id="iface" style="min-width:320px"></select>
+    <button id="btnRefreshIface">刷新</button>
+    <button id="btnStart" class="primary">开始测试</button>
+    <button id="btnStop" class="stop" disabled>停止</button>
+    <span id="runHint" class="hint"></span>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>流量配置（8 条流 · 5 元组 / DSCP / 双速率限速）</h2>
+  <table class="cfg-table">
+    <thead>
+      <tr>
+        <th>流名</th><th>源 IP</th><th>源端口</th><th>目的 IP</th><th>目的端口</th>
+        <th>DSCP</th><th>带宽 Mbps</th><th>包速率 pps</th><th>载荷字节</th>
+      </tr>
+    </thead>
+    <tbody id="cfgBody"></tbody>
+  </table>
+  <div class="row" style="margin-top:8px">
+    <button id="btnApply" class="primary">应用配置</button>
+    <span class="hint">应用后若测试正在运行将自动重启；DSCP 可填 0-63 或名字（EF/AF41/CS7）</span>
+  </div>
+</div>
+
+<div class="panel">
+  <h2>实时速率曲线（TX 实线 / RX 虚线）</h2>
+  <div class="legend" id="legend"></div>
+  <canvas id="chart"></canvas>
+  <table class="stats">
+    <thead><tr>
+      <th>流</th><th>DSCP</th><th>5元组</th>
+      <th>TX Mbps</th><th>TX pps</th><th>RX Mbps</th><th>RX pps</th>
+      <th>TX 包</th><th>RX 包</th><th>丢失</th><th>丢包率</th>
+    </tr></thead>
+    <tbody id="statsBody"></tbody>
+  </table>
+  <p id="msg"></p>
+</div>
+
 <script>
 const COLORS = ["#e6194B","#3cb44b","#ffe119","#4363d8","#f58231","#911eb4","#42d4f4","#f032e6"];
-const WINDOW = 300; // 显示最近 300 个采样点
+const WINDOW = 300;
 const canvas = document.getElementById('chart');
 const ctx = canvas.getContext('2d');
+let remoteControl = true;
+let lastIface = localStorage.getItem('qostool.iface') || '';
+
+const $ = id => document.getElementById(id);
+
+// ---------- 接口 ----------
+
+async function loadInterfaces(select) {
+  try {
+    const r = await fetch('/api/interfaces');
+    if (!r.ok) throw new Error(await r.text());
+    const devs = await r.json();
+    const sel = $('iface');
+    const prev = lastIface || sel.value;
+    sel.innerHTML = '';
+    for (const d of devs) {
+      const opt = document.createElement('option');
+      opt.value = d.name;
+      opt.textContent = d.description ? d.description + '  [' + d.name + ']' : d.name;
+      sel.appendChild(opt);
+    }
+    if (prev) sel.value = prev;
+    if (!sel.value && devs.length) sel.value = devs[0].name;
+    if (select && sel.value) applyIface();
+  } catch (e) { showMsg('枚举接口失败: ' + e.message, true); }
+}
+
+function applyIface() {
+  lastIface = $('iface').value;
+  localStorage.setItem('qostool.iface', lastIface);
+}
+
+// ---------- 配置表单 ----------
+
+function loadConfig() {
+  fetch('/api/config').then(r => r.json()).then(cfg => {
+    buildLegend(cfg.flows.length);
+    const body = $('cfgBody');
+    body.innerHTML = '';
+    for (const f of cfg.flows) {
+      const tr = document.createElement('tr');
+      const cell = (id, val) => `<td class="${id==='name'?'name':id==='src_ip'||id==='dst_ip'?'ip':id==='dscp'?'dscp':'num'}"><input data-id="${id}" value="${esc(f[id])}"></td>`;
+      tr.innerHTML =
+        cell('name', f.name) + cell('src_ip', f.src_ip) + cell('src_port', f.src_port) +
+        cell('dst_ip', f.dst_ip) + cell('dst_port', f.dst_port) + cell('dscp', f.dscp) +
+        cell('rate_mbps', f.rate_mbps) + cell('rate_pps', f.rate_pps) + cell('payload_size', f.payload_size);
+      body.appendChild(tr);
+    }
+    // 最后一列是载荷字节，表头 9 列
+  }).catch(e => showMsg('加载配置失败: ' + e.message, true));
+}
+
+const esc = v => String(v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
+async function applyConfig() {
+  const rows = document.querySelectorAll('#cfgBody tr');
+  const flows = [];
+  for (const tr of rows) {
+    const get = id => tr.querySelector(`input[data-id="${id}"]`).value.trim();
+    flows.push({
+      name: get('name'), protocol: 'udp',
+      src_ip: get('src_ip'), src_port: +get('src_port'),
+      dst_ip: get('dst_ip'), dst_port: +get('dst_port'),
+      dscp: get('dscp'),
+      rate_mbps: +get('rate_mbps') || 0, rate_pps: +get('rate_pps') || 0,
+      payload_size: +get('payload_size') || 0,
+    });
+  }
+  try {
+    const r = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({flows}),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    showMsg(d.restarted ? '配置已应用，测试已自动重启' : '配置已应用（未运行）', false);
+  } catch (e) { showMsg('应用配置失败: ' + e.message, true); }
+}
+
+// ---------- 启停 ----------
+
+async function doStart() {
+  const iface = $('iface').value;
+  if (!iface) { showMsg('请先选择监听接口', true); return; }
+  applyIface();
+  try {
+    const r = await fetch('/api/start', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({iface}),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    showMsg('测试已启动（接口 ' + iface + '）', false);
+  } catch (e) { showMsg('启动失败: ' + e.message, true); }
+}
+
+async function doStop() {
+  try {
+    const r = await fetch('/api/stop', {method: 'POST'});
+    if (!r.ok) throw new Error(r.statusText);
+    showMsg('测试已停止', false);
+  } catch (e) { showMsg('停止失败: ' + e.message, true); }
+}
+
+// ---------- 状态 ----------
+
+async function loadStatus() {
+  try {
+    const r = await fetch('/api/status');
+    const st = await r.json();
+    remoteControl = st.remote_control;
+    const badge = $('badge');
+    if (st.running) {
+      badge.textContent = '运行中 ' + (st.iface || '') + ' · ' + new Date(st.started).toLocaleTimeString();
+      badge.className = 'badge running';
+      $('btnStart').disabled = true;
+      $('btnStop').disabled = false;
+      $('runHint').textContent = '';
+    } else {
+      badge.textContent = '未运行';
+      badge.className = 'badge stopped';
+      $('btnStart').disabled = !remoteControl;
+      $('btnStop').disabled = true;
+      $('runHint').textContent = remoteControl ? '' : '命令行模式：测试由命令行控制，页面只读';
+    }
+    $('btnApply').disabled = !remoteControl;
+    $('iface').disabled = !remoteControl;
+  } catch (e) { /* 服务未就绪 */ }
+}
+
+// ---------- 图表 ----------
 
 function resize() {
   canvas.width = canvas.clientWidth * devicePixelRatio;
@@ -45,7 +245,11 @@ function drawChart(hist) {
   const W = canvas.width / devicePixelRatio, H = canvas.height / devicePixelRatio;
   ctx.clearRect(0, 0, W, H);
   const n = Math.min(hist.t.length, WINDOW);
-  if (n < 2) return;
+  if (n < 2) {
+    ctx.fillStyle = "#666"; ctx.font = "13px sans-serif";
+    ctx.fillText("暂无数据（开始测试后显示曲线）", W/2 - 110, H/2);
+    return;
+  }
   let max = 1;
   for (let f = 0; f < hist.tx.length; f++) {
     const tx = hist.tx[f], rx = hist.rx[f];
@@ -79,8 +283,10 @@ function drawChart(hist) {
   }
 }
 
+// ---------- 统计表格 ----------
+
 function renderTable(flows) {
-  const tbody = document.querySelector('#tbl tbody');
+  const tbody = $('statsBody');
   tbody.innerHTML = '';
   const fmt = v => v >= 1e9 ? (v/1e9).toFixed(2)+'G' : v >= 1e6 ? (v/1e6).toFixed(2)+'M'
              : v >= 1e3 ? (v/1e3).toFixed(2)+'K' : v;
@@ -88,7 +294,7 @@ function renderTable(flows) {
     const tr = document.createElement('tr');
     if (f.loss_rate > 0) tr.className = 'loss';
     tr.innerHTML =
-      `<td>${f.name}</td><td>${f.dscp}</td><td>${f.src_ip}:${f.src_port}->${f.dst_ip}:${f.dst_port}</td>` +
+      `<td>${esc(f.name)}</td><td>${f.dscp}</td><td>${f.src_ip}:${f.src_port}->${f.dst_ip}:${f.dst_port}</td>` +
       `<td>${(f.tx_bps*8/1e6).toFixed(2)}</td><td>${f.tx_pps.toFixed(0)}</td>` +
       `<td>${(f.rx_bps*8/1e6).toFixed(2)}</td><td>${f.rx_pps.toFixed(0)}</td>` +
       `<td>${fmt(f.tx_packets)}</td><td>${fmt(f.rx_packets)}</td>` +
@@ -97,23 +303,54 @@ function renderTable(flows) {
   }
 }
 
+// ---------- 轮询 ----------
+
+let lastStats = {flows: [], history: {t: [], tx: [], rx: []}};
+
 async function tick() {
   try {
     const r = await fetch('/api/stats');
     const d = await r.json();
+    lastStats = d;
     document.getElementById('clock').textContent = new Date(d.now).toLocaleTimeString();
     drawChart(d.history);
     renderTable(d.flows);
-  } catch (e) { /* 服务未就绪，稍后重试 */ }
+  } catch (e) { /* 服务未就绪 */ }
   setTimeout(tick, 500);
 }
 
-const legend = document.getElementById('legend');
-for (let i = 0; i < 8; i++) {
-  const s = document.createElement('span');
-  s.innerHTML = `<span class="sw" style="background:${COLORS[i]}"></span>flow${i+1} TX/虚线RX`;
-  legend.appendChild(s);
+function showMsg(text, isErr) {
+  const m = $('msg');
+  m.textContent = text;
+  m.className = isErr ? 'err' : 'ok';
 }
+
+// ---------- 初始化 ----------
+
+$('btnStart').onclick = doStart;
+$('btnStop').onclick = doStop;
+$('btnApply').onclick = applyConfig;
+$('btnRefreshIface').onclick = () => loadInterfaces(false);
+$('iface').onchange = applyIface;
+
+// 图例（按实际流数生成，最多 8）
+function buildLegend(n) {
+  const legend = $('legend');
+  legend.innerHTML = '';
+  const note = document.createElement('span');
+  note.innerHTML = 'TX 实线 / RX 虚线：';
+  legend.appendChild(note);
+  for (let i = 0; i < n; i++) {
+    const s = document.createElement('span');
+    s.innerHTML = `<span class="sw" style="background:${COLORS[i % 8]}"></span>流${i+1}`;
+    legend.appendChild(s);
+  }
+}
+
+loadInterfaces(true);
+loadConfig();
+loadStatus();
+setInterval(loadStatus, 1000);
 tick();
 </script>
 </body>

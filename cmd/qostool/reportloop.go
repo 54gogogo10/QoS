@@ -7,17 +7,18 @@ import (
 	"time"
 
 	"qostool/internal/config"
+	"qostool/internal/controller"
 	"qostool/internal/report"
-	"qostool/internal/stats"
 )
 
-// reportLoop 每 interval 采样一次；TTY 下每秒重绘表格，非 TTY 每 5 秒打印一行日志。
-func reportLoop(ctx context.Context, cfg *config.Config, agg *stats.Aggregator,
-	haveSender, haveCapture bool, capErrCh chan error, interval time.Duration) {
-
+// reportLoop 显示实时表格：TTY 下每秒清屏重绘，非 TTY 每 5 秒打印一行日志。
+// 采样（100ms）由 controller 内部完成，这里只负责展示。
+func reportLoop(ctx context.Context, cfg *config.Config, ctrl *controller.Controller, interval time.Duration) {
 	isTTY := isTerminal(os.Stdout)
 	next := time.Now()
 	var lastDraw time.Time
+	haveSender := ctrl.Mode() != controller.ModeRecv
+	haveCapture := ctrl.Mode() != controller.ModeSend
 	for {
 		next = next.Add(interval)
 		timer := time.NewTimer(time.Until(next))
@@ -27,17 +28,10 @@ func reportLoop(ctx context.Context, cfg *config.Config, agg *stats.Aggregator,
 			return
 		case <-timer.C:
 		}
-		agg.Snapshot(time.Now())
-
-		select {
-		case err := <-capErrCh:
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "警告: 抓包已停止:", err)
-			}
-			capErrCh = nil
-		default:
+		agg := ctrl.Aggregator()
+		if agg == nil {
+			continue
 		}
-
 		if isTTY {
 			if time.Since(lastDraw) >= time.Second {
 				lastDraw = time.Now()

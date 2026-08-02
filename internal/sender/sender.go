@@ -48,6 +48,13 @@ func (s *Sender) Run(ctx context.Context) {
 	wg.Wait()
 }
 
+// Close 关闭全部流的 UDP socket（用于启动失败时的清理）。
+func (s *Sender) Close() {
+	for _, f := range s.flows {
+		f.conn.Close()
+	}
+}
+
 type flow struct {
 	idx          int
 	conn         *net.UDPConn

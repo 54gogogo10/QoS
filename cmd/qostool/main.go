@@ -8,38 +8,48 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/gopacket/gopacket/pcap"
 
-	"qostool/internal/capture"
 	"qostool/internal/config"
+	"qostool/internal/controller"
 	"qostool/internal/report"
-	"qostool/internal/sender"
-	"qostool/internal/stats"
 	"qostool/internal/web"
 )
 
 const (
-	defaultWebPort = "16666"
+	defaultWebAddr = "127.0.0.1:16666"
 	histCap        = 3000
 )
 
 func main() {
+	// 无参数（如双击 exe）进入桌面 App 模式
 	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+		if err := runApp(); err != nil {
+			fmt.Fprintln(os.Stderr, "错误:", err)
+			os.Exit(1)
+		}
+		return
 	}
 	mode := os.Args[1]
 	switch mode {
-	case "send", "recv", "bidir", "lsdev":
+	case "send", "recv", "bidir", "lsdev", "app":
 	default:
 		fmt.Fprintf(os.Stderr, "未知命令 %q\n", mode)
 		usage()
 		os.Exit(2)
 	}
-	if err := run(mode, os.Args[2:]); err != nil {
+	if mode == "app" {
+		if err := runApp(); err != nil {
+			fmt.Fprintln(os.Stderr, "错误:", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if err := runCLI(mode, os.Args[2:]); err != nil {
 		fmt.Fprintln(os.Stderr, "错误:", err)
 		os.Exit(1)
 	}
@@ -49,18 +59,63 @@ func usage() {
 	fmt.Fprint(os.Stderr, `qostool - QoS 测试工具
 
 用法:
-  qostool send   -c flows.yaml [--web 16666] [-d 秒] [--interval 毫秒]  纯发送
-  qostool recv   -c flows.yaml -i 接口 [--web 16666] [-d 秒]            纯接收
-  qostool bidir  -c flows.yaml -i 接口 [--web 16666] [-d 秒]            双向发送+接收
-  qostool lsdev                                                         列出可用的抓包接口
+  双击 exe 或 qostool app                         桌面应用（内嵌窗口，页面内配置与启停）
+  qostool send   -c flows.yaml [--web 16666] [-d 秒]  纯发送
+  qostool recv   -c flows.yaml -i 接口 [--web 16666] [-d 秒]  纯接收
+  qostool bidir  -c flows.yaml -i 接口 [--web 16666] [-d 秒]  双向发送+接收
+  qostool lsdev                                  列出可用的抓包接口
 `)
 }
 
-func run(mode string, args []string) error {
+// runApp 桌面应用模式：内嵌 WebView2 窗口 + 本地 Web 服务（仅 127.0.0.1）。
+func runApp() error {
+	cfgPath, err := resolveConfigPath()
+	if err != nil {
+		return err
+	}
+	cfg, err := loadOrCreateConfig(cfgPath)
+	if err != nil {
+		return err
+	}
+
+	ctrl := controller.New(cfg, controller.ModeBidir)
+	srv := web.New(ctrl, cfgPath, true)
+	webErr := make(chan error, 1)
+	go func() {
+		if err := srv.ListenAndServe(defaultWebAddr); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			webErr <- err
+		}
+	}()
+
+	w := newWebView()
+	if w == nil {
+		// WebView2 运行时不可用：兜底用系统默认浏览器打开页面
+		fmt.Fprintln(os.Stderr, "警告: WebView2 运行时不可用，改用系统浏览器打开")
+		openBrowser("http://" + defaultWebAddr)
+		<-webErr // 等待 Web 服务退出（Ctrl+C）
+		ctrl.Stop()
+		return nil
+	}
+	defer w.Destroy()
+
+	w.SetTitle("qostool - QoS 测试工具")
+	w.SetSize(1280, 820, hintNone)
+	w.Navigate("http://" + defaultWebAddr)
+	w.Run()
+
+	ctrl.Stop()
+	sc, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	srv.Shutdown(sc)
+	cancel()
+	return nil
+}
+
+// runCLI 命令行模式：send/recv/bidir。
+func runCLI(mode string, args []string) error {
 	fs := flag.NewFlagSet(mode, flag.ExitOnError)
 	cfgPath := fs.String("c", "", "配置文件路径 (yaml)")
 	iface := fs.String("i", "", "监听接口 (recv/bidir 必填)")
-	webPort := fs.String("web", defaultWebPort, "Web 端口 (填 off 关闭)")
+	webPort := fs.String("web", "16666", "Web 端口 (填 off 关闭)")
 	dur := fs.Int("d", 0, "运行秒数 (0=直到 Ctrl+C)")
 	interval := fs.Int("interval", 100, "统计采样间隔毫秒")
 	fs.Parse(args)
@@ -82,7 +137,20 @@ func run(mode string, args []string) error {
 	if err != nil {
 		return err
 	}
-	agg := stats.NewAggregator(len(cfg.Flows), histCap)
+
+	var ctrlMode controller.Mode
+	switch mode {
+	case "send":
+		ctrlMode = controller.ModeSend
+	case "recv":
+		ctrlMode = controller.ModeRecv
+	default:
+		ctrlMode = controller.ModeBidir
+	}
+	ctrl := controller.New(cfg, ctrlMode)
+	if err := ctrl.Start(*iface); err != nil {
+		return err
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -91,32 +159,9 @@ func run(mode string, args []string) error {
 		defer stop()
 	}
 
-	haveSender := mode == "send" || mode == "bidir"
-	haveCapture := mode == "recv" || mode == "bidir"
-
-	if haveSender {
-		s, err := sender.New(cfg, agg)
-		if err != nil {
-			return err
-		}
-		go s.Run(ctx)
-	}
-
-	var capErrCh chan error
-	if haveCapture {
-		c, err := capture.New(*iface, cfg, agg)
-		if err != nil {
-			return err
-		}
-		capErrCh = make(chan error, 1)
-		go func() {
-			capErrCh <- c.Run(ctx)
-		}()
-	}
-
 	var srv *web.Server
 	if *webPort != "off" {
-		srv = web.New(cfg, agg)
+		srv = web.New(ctrl, "", false) // CLI 模式下页面只读
 		go func() {
 			if err := srv.ListenAndServe(":" + *webPort); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				fmt.Fprintf(os.Stderr, "Web 服务错误 (端口被占可换 --web 端口): %v\n", err)
@@ -124,18 +169,22 @@ func run(mode string, args []string) error {
 		}()
 	}
 
-	reportLoop(ctx, cfg, agg, haveSender, haveCapture, capErrCh, time.Duration(*interval)*time.Millisecond)
+	reportLoop(ctx, cfg, ctrl, time.Duration(*interval)*time.Millisecond)
 
+	ctrl.Stop()
 	if srv != nil {
 		sc, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		srv.Shutdown(sc)
 		cancel()
 	}
 
-	snap := agg.Current(time.Now())
-	txTotal, rxTotal, lost := agg.Totals()
-	fmt.Println()
-	fmt.Print(report.Summary(cfg, snap, txTotal, rxTotal, lost))
+	agg := ctrl.Aggregator()
+	if agg != nil {
+		snap := agg.Current(time.Now())
+		txTotal, rxTotal, lost := agg.Totals()
+		fmt.Println()
+		fmt.Print(report.Summary(cfg, snap, txTotal, rxTotal, lost))
+	}
 	return nil
 }
 
@@ -149,4 +198,44 @@ func listDevices() error {
 		fmt.Printf("%s\t%s\n", d.Name, d.Description)
 	}
 	return nil
+}
+
+// resolveConfigPath 返回配置文件路径：exe 同目录 config.yaml，
+// 无写权限时退回用户主目录。
+func resolveConfigPath() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Dir(exe)
+	p := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(p, []byte{}, 0o644); err == nil {
+		os.Remove(p)
+		return p, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("无法确定配置文件位置: %w", err)
+	}
+	hd := filepath.Join(home, ".qostool")
+	if err := os.MkdirAll(hd, 0o755); err != nil {
+		return "", err
+	}
+	return filepath.Join(hd, "config.yaml"), nil
+}
+
+// loadOrCreateConfig 加载配置文件；不存在或非法时用内置默认配置并落盘。
+func loadOrCreateConfig(path string) (*config.Config, error) {
+	if _, err := os.Stat(path); err == nil {
+		cfg, err := config.Load(path)
+		if err == nil {
+			return cfg, nil
+		}
+		fmt.Fprintln(os.Stderr, "警告: 配置文件无效，使用内置默认配置:", err)
+	}
+	cfg := config.DefaultConfig()
+	if err := cfg.Save(path); err != nil {
+		return nil, fmt.Errorf("写入默认配置 %s 失败: %w", path, err)
+	}
+	return cfg, nil
 }

@@ -69,3 +69,40 @@ func TestDSCPName(t *testing.T) {
 func yamlNode(value, tag string) *yaml.Node {
 	return &yaml.Node{Kind: yaml.ScalarNode, Tag: tag, Value: value}
 }
+
+func TestParseDSCP(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+		err  bool
+	}{
+		{"46", 46, false}, {"EF", 46, false}, {"af41", 34, false}, {"CS7", 56, false},
+		{" 0 ", 0, false}, {"63", 63, false},
+		{"64", 0, true}, {"-1", 0, true}, {"XYZ", 0, true}, {"", 0, true},
+	}
+	for _, c := range cases {
+		v, err := ParseDSCP(c.in)
+		if c.err {
+			if err == nil {
+				t.Fatalf("%q: 期望报错", c.in)
+			}
+			continue
+		}
+		if err != nil || v != c.want {
+			t.Fatalf("%q = %d, %v; want %d", c.in, v, err, c.want)
+		}
+	}
+}
+
+func TestDSCPMarshalYAML(t *testing.T) {
+	var d DSCP = 46
+	v, err := d.MarshalYAML()
+	if err != nil || v != "EF" {
+		t.Fatalf("46 应序列化为 EF, got %v, %v", v, err)
+	}
+	var d2 DSCP = 1
+	v2, _ := d2.MarshalYAML()
+	if v2 != 1 {
+		t.Fatalf("1 应序列化为数字, got %v", v2)
+	}
+}

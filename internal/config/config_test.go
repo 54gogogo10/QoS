@@ -76,3 +76,39 @@ func TestLoadErrors(t *testing.T) {
 func flowLine() string {
 	return "  - name: a\n    protocol: udp\n    src_ip: 1.1.1.1\n    dst_ip: 2.2.2.2\n    src_port: 1\n    dst_port: 2\n    dscp: 0\n    rate_pps: 100\n"
 }
+
+func TestDefaultConfigValid(t *testing.T) {
+	cfg := DefaultConfig()
+	if len(cfg.Flows) != 8 {
+		t.Fatalf("默认配置应为 8 条流, got %d", len(cfg.Flows))
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("默认配置校验失败: %v", err)
+	}
+	// DSCP 应覆盖 46/34/26/18/48/40/32/0
+	want := []int{46, 34, 26, 18, 48, 40, 32, 0}
+	for i, w := range want {
+		if int(cfg.Flows[i].DSCP) != w {
+			t.Fatalf("flow %d DSCP = %d, want %d", i, cfg.Flows[i].DSCP, w)
+		}
+	}
+}
+
+func TestConfigSaveRoundTrip(t *testing.T) {
+	cfg := DefaultConfig()
+	p := filepath.Join(t.TempDir(), "config.yaml")
+	if err := cfg.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	cfg2, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg2.Flows) != 8 {
+		t.Fatalf("往返后流数 = %d", len(cfg2.Flows))
+	}
+	// DSCP 名字应能往返（MarshalYAML 输出名字，UnmarshalYAML 读回）
+	if int(cfg2.Flows[0].DSCP) != 46 {
+		t.Fatalf("DSCP 往返失败: %d", cfg2.Flows[0].DSCP)
+	}
+}

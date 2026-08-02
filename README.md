@@ -4,21 +4,32 @@
 接收端按 DSCP + 5 元组精确匹配，实时统计每条流的收发速率与丢包率。
 提供终端实时表格与 Web 曲线页面（默认端口 16666）。
 
+## 两种使用方式
+
+**桌面应用（推荐）**：双击 `qostool-app.exe` → 弹出内嵌窗口（无需浏览器），
+页面内可选择监听接口、编辑 8 条流的配置（5 元组 / DSCP / 速率）、开始/停止测试并实时查看曲线。
+配置自动保存到 exe 同目录的 `config.yaml`。需要 Windows 10/11 自带的 WebView2 运行时。
+
+**命令行**：适合脚本化与无人值守，见下方用法。
+
 ## 构建
 
-依赖：Go ≥ 1.22、libpcap（接收路径）。
+依赖：Go ≥ 1.22、libpcap（接收路径）、cgo 编译器。
 
-- **Linux**: `sudo apt install libpcap-dev` 后 `go build -o qostool ./cmd/qostool`
+- **Linux**: `sudo apt install libpcap-dev gcc` 后 `go build -o qostool ./cmd/qostool`
 - **Windows**: 需要 MinGW gcc、Npcap（运行时，https://npcap.com）、Npcap SDK（解压到 C:\WpdPack）：
 
 ```bash
 export CGO_ENABLED=1
 export CGO_CFLAGS="-IC:/WpdPack/Include"
 export CGO_LDFLAGS="-LC:/WpdPack/Lib/x64 -lwpcap"
-go build -o qostool.exe ./cmd/qostool
+go build -o qostool.exe ./cmd/qostool                      # 命令行版
+# 桌面版：go get github.com/jchv/go-webview2 后
+# 把 tools/WebView2Loader.dll 放到 exe 同目录
+GOFLAGS="" go build -ldflags "-H windowsgui" -o qostool-app.exe ./cmd/qostool
 ```
 
-## 用法
+## 用法（命令行）
 
 ```bash
 qostool lsdev                                  # 列出抓包接口

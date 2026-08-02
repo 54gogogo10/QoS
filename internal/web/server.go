@@ -5,32 +5,41 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/gopacket/gopacket/pcap"
+
 	"qostool/internal/config"
-	"qostool/internal/stats"
+	"qostool/internal/controller"
 )
 
 //go:embed static/index.html
 var staticFS embed.FS
 
-// Server 提供 /api/stats 与静态页面。
+// Server 提供页面与 JSON API：监控 + 运行控制（接口选择、启停、配置编辑）。
 type Server struct {
-	cfg *config.Config
-	agg *stats.Aggregator
-	srv *http.Server
+	ctrl          *controller.Controller
+	cfgPath       string // 配置持久化路径；空串表示不保存
+	remoteControl bool   // true=页面可启停/改配置（app 模式）；false=只读监控（CLI 模式）
+	srv           *http.Server
 }
 
 // New 创建 Web 服务。
-func New(cfg *config.Config, agg *stats.Aggregator) *Server {
-	return &Server{cfg: cfg, agg: agg}
+func New(ctrl *controller.Controller, cfgPath string, remoteControl bool) *Server {
+	return &Server{ctrl: ctrl, cfgPath: cfgPath, remoteControl: remoteControl}
 }
 
-// ListenAndServe 启动 HTTP 服务（addr 如 ":16666"）。
+// ListenAndServe 启动 HTTP 服务（addr 如 "127.0.0.1:16666"）。
 func (s *Server) ListenAndServe(addr string) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/stats", s.handleStats)
+	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/interfaces", s.handleInterfaces)
+	mux.HandleFunc("/api/config", s.handleConfig)
+	mux.HandleFunc("/api/start", s.handleStart)
+	mux.HandleFunc("/api/stop", s.handleStop)
 	mux.HandleFunc("/", s.handleIndex)
 	s.srv = &http.Server{Addr: addr, Handler: mux}
 	return s.srv.ListenAndServe()
@@ -44,8 +53,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.srv.Shutdown(ctx)
 }
 
+// ---------- API 结构 ----------
+
 type apiStats struct {
 	Now     int64      `json:"now"`
+	Running bool       `json:"running"`
 	Flows   []apiFlow  `json:"flows"`
 	History apiHistory `json:"history"`
 }
@@ -76,32 +88,241 @@ type apiHistory struct {
 	Rx [][]float64 `json:"rx"`
 }
 
+type apiConfigFlow struct {
+	Name        string  `json:"name"`
+	Protocol    string  `json:"protocol"`
+	SrcIP       string  `json:"src_ip"`
+	DstIP       string  `json:"dst_ip"`
+	SrcPort     int     `json:"src_port"`
+	DstPort     int     `json:"dst_port"`
+	DSCP        string  `json:"dscp"` // 数字或名字
+	RateMbps    float64 `json:"rate_mbps"`
+	RatePPS     float64 `json:"rate_pps"`
+	PayloadSize int     `json:"payload_size"`
+}
+
+type apiConfig struct {
+	Flows []apiConfigFlow `json:"flows"`
+}
+
+// toConfig 把 API 配置转成内部配置并校验。
+func (a *apiConfig) toConfig() (*config.Config, error) {
+	if len(a.Flows) == 0 {
+		return nil, fmt.Errorf("flows 不能为空")
+	}
+	if len(a.Flows) > 8 {
+		return nil, fmt.Errorf("最多支持 8 条流，当前 %d 条", len(a.Flows))
+	}
+	cfg := &config.Config{}
+	for i, f := range a.Flows {
+		dscp, err := config.ParseDSCP(f.DSCP)
+		if err != nil {
+			return nil, fmt.Errorf("flow %d (%s): %v", i+1, f.Name, err)
+		}
+		cfg.Flows = append(cfg.Flows, config.Flow{
+			Name: f.Name, Protocol: f.Protocol,
+			SrcIP: f.SrcIP, DstIP: f.DstIP,
+			SrcPort: f.SrcPort, DstPort: f.DstPort,
+			DSCP:        config.DSCP(dscp),
+			RateMbps:    f.RateMbps,
+			RatePPS:     f.RatePPS,
+			PayloadSize: f.PayloadSize,
+		})
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func (s *Server) configToAPI(cfg *config.Config) apiConfig {
+	out := apiConfig{Flows: make([]apiConfigFlow, len(cfg.Flows))}
+	for i, f := range cfg.Flows {
+		out.Flows[i] = apiConfigFlow{
+			Name: f.Name, Protocol: f.Protocol,
+			SrcIP: f.SrcIP, DstIP: f.DstIP,
+			SrcPort: f.SrcPort, DstPort: f.DstPort,
+			DSCP:        dscpDisplay(f.DSCP),
+			RateMbps:    f.RateMbps,
+			RatePPS:     f.RatePPS,
+			PayloadSize: f.PayloadSize,
+		}
+	}
+	return out
+}
+
+func dscpDisplay(d config.DSCP) string {
+	if n := d.Name(); n != "" {
+		return n
+	}
+	return fmt.Sprintf("%d", d)
+}
+
+// ---------- Handlers ----------
+
+func (s *Server) requireControl(w http.ResponseWriter, r *http.Request) bool {
+	if !s.remoteControl {
+		http.Error(w, "命令行模式下页面控制已禁用", http.StatusForbidden)
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	now := time.Now()
-	snap := s.agg.Current(now)
-	hist := s.agg.History()
+	agg := s.ctrl.Aggregator()
+	cfg := s.ctrl.Config()
+	status := s.ctrl.Status()
 	out := apiStats{
 		Now:     now.UnixMilli(),
-		Flows:   make([]apiFlow, len(snap)),
-		History: apiHistory{T: hist.T, Tx: hist.TxB, Rx: hist.RxB},
+		Running: status.Running,
+		Flows:   make([]apiFlow, 0, len(cfg.Flows)),
+		History: apiHistory{T: []int64{}, Tx: [][]float64{}, Rx: [][]float64{}},
 	}
-	for i, f := range s.cfg.Flows {
-		sf := snap[i]
-		out.Flows[i] = apiFlow{
-			Idx: i, Name: f.Name, DSCP: int(f.DSCP),
-			SrcIP: f.SrcIP, DstIP: f.DstIP, SrcPort: f.SrcPort, DstPort: f.DstPort,
-			TxBps: sf.TxBps, TxPps: sf.TxPps, RxBps: sf.RxBps, RxPps: sf.RxPps,
-			TxPackets: sf.TxPackets, TxBytes: sf.TxBytes,
-			RxPackets: sf.RxPackets, RxBytes: sf.RxBytes,
-			Lost: sf.Lost, LossRate: sf.LossRate,
+	if agg != nil {
+		snap := agg.Current(now)
+		hist := agg.History()
+		out.Flows = make([]apiFlow, len(snap))
+		out.History = apiHistory{T: hist.T, Tx: hist.TxB, Rx: hist.RxB}
+		for i, f := range cfg.Flows {
+			sf := snap[i]
+			out.Flows[i] = apiFlow{
+				Idx: i, Name: f.Name, DSCP: int(f.DSCP),
+				SrcIP: f.SrcIP, DstIP: f.DstIP, SrcPort: f.SrcPort, DstPort: f.DstPort,
+				TxBps: sf.TxBps, TxPps: sf.TxPps, RxBps: sf.RxBps, RxPps: sf.RxPps,
+				TxPackets: sf.TxPackets, TxBytes: sf.TxBytes,
+				RxPackets: sf.RxPackets, RxBytes: sf.RxBytes,
+				Lost: sf.Lost, LossRate: sf.LossRate,
+			}
 		}
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(out)
+	writeJSON(w, out)
+}
+
+func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	st := s.ctrl.Status()
+	writeJSON(w, struct {
+		Running       bool      `json:"running"`
+		Iface         string    `json:"iface"`
+		Started       time.Time `json:"started"`
+		RemoteControl bool      `json:"remote_control"`
+		Mode          string    `json:"mode"`
+	}{
+		Running: st.Running, Iface: st.Iface, Started: st.Started,
+		RemoteControl: s.remoteControl, Mode: string(s.ctrl.Mode()),
+	})
+}
+
+func (s *Server) handleInterfaces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	devs, err := pcap.FindAllDevs()
+	if err != nil {
+		http.Error(w, "枚举接口失败: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	type apiIface struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+	out := make([]apiIface, 0, len(devs))
+	for _, d := range devs {
+		out = append(out, apiIface{Name: d.Name, Description: d.Description})
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead:
+		writeJSON(w, s.configToAPI(s.ctrl.Config()))
+	case http.MethodPost:
+		if !s.requireControl(w, r) {
+			return
+		}
+		var in apiConfig
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			http.Error(w, "请求体解析失败: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		cfg, err := in.toConfig()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if s.cfgPath != "" {
+			if err := cfg.Save(s.cfgPath); err != nil {
+				http.Error(w, "保存配置文件失败: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		restarted, err := s.ctrl.UpdateConfig(cfg)
+		if err != nil {
+			http.Error(w, "应用配置失败: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, struct {
+			OK        bool   `json:"ok"`
+			Restarted bool   `json:"restarted"`
+			Message   string `json:"message"`
+		}{OK: true, Restarted: restarted, Message: "配置已保存"})
+	default:
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireControl(w, r) {
+		return
+	}
+	var in struct {
+		Iface string `json:"iface"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		http.Error(w, "请求体解析失败: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if in.Iface == "" {
+		http.Error(w, "缺少 iface 参数", http.StatusBadRequest)
+		return
+	}
+	if err := s.ctrl.Start(in.Iface); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, struct {
+		OK      bool   `json:"ok"`
+		Message string `json:"message"`
+	}{OK: true, Message: "测试已启动"})
+}
+
+func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireControl(w, r) {
+		return
+	}
+	s.ctrl.Stop()
+	writeJSON(w, struct {
+		OK      bool   `json:"ok"`
+		Message string `json:"message"`
+	}{OK: true, Message: "测试已停止"})
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -116,4 +337,9 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(data)
+}
+
+func writeJSON(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
 }
