@@ -152,7 +152,7 @@ function applyIface() {
 
 function loadConfig() {
   fetch('/api/config').then(r => r.json()).then(cfg => {
-    buildLegend(cfg.flows.length);
+    buildLegend(cfg.flows);
     const body = $('cfgBody');
     body.innerHTML = '';
     for (const f of cfg.flows) {
@@ -193,6 +193,7 @@ async function applyConfig() {
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || r.statusText);
     showMsg(d.restarted ? '配置已应用，测试已自动重启' : '配置已应用（未运行）', false);
+    buildLegend(flows); // 图例同步新流名
   } catch (e) { showMsg('应用配置失败: ' + e.message, true); }
 }
 
@@ -363,16 +364,16 @@ $('btnApply').onclick = applyConfig;
 $('btnRefreshIface').onclick = () => loadInterfaces(false);
 $('iface').onchange = () => { applyIface(); updateStartButton(); };
 
-// 图例（按实际流数生成，最多 8）
-function buildLegend(n) {
+// 图例（按实际配置的流名生成，最多 8）
+function buildLegend(flows) {
   const legend = $('legend');
   legend.innerHTML = '';
   const note = document.createElement('span');
   note.innerHTML = 'TX 实线 / RX 虚线：';
   legend.appendChild(note);
-  for (let i = 0; i < n; i++) {
+  for (let i = 0; i < flows.length; i++) {
     const s = document.createElement('span');
-    s.innerHTML = `<span class="sw" style="background:${COLORS[i % 8]}"></span>流${i+1}`;
+    s.innerHTML = `<span class="sw" style="background:${COLORS[i % 8]}"></span>${esc(flows[i].name)}`;
     legend.appendChild(s);
   }
 }
