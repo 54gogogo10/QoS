@@ -25,7 +25,7 @@ flows:
     dst_port: 20000
     dscp: 46
     rate_mbps: 10
-    payload_size: 128
+    ip_len: 156
   - name: af41
     protocol: udp
     src_ip: 192.168.1.10
@@ -34,7 +34,7 @@ flows:
     dst_port: 20001
     dscp: AF41
     rate_pps: 1000
-    payload_size: 64
+    ip_len: 92
 `
 
 func TestLoadValid(t *testing.T) {

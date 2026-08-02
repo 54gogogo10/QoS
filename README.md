@@ -49,7 +49,7 @@ Web 页面：浏览器打开 `http://<本机IP>:16666`，实时曲线 + 表格�
 ## 配置
 
 见 `configs/example.yaml`。每条流：5 元组（src/dst IP、端口、udp 协议）、`dscp`（0-63 或名字如 EF/AF41/CS7）、
-`rate_mbps` 与 `rate_pps`（双参数限速，至少填一个，取先到者）、`payload_size`。
+`rate_mbps` 与 `rate_pps`（双参数限速，至少填一个，取先到者）、`ip_len`（IP 包总长，含 IP/UDP 头，IPv4 最小 38、IPv6 最小 58）。
 
 收发两端必须使用同一份配置；发送载荷内嵌序列号，接收端据此计算丢包率。
 

@@ -99,7 +99,7 @@ type apiConfigFlow struct {
 	DSCP        string  `json:"dscp"` // 数字或名字
 	RateMbps    float64 `json:"rate_mbps"`
 	RatePPS     float64 `json:"rate_pps"`
-	PayloadSize int     `json:"payload_size"`
+	IPLen       int     `json:"ip_len"` // IP 包总长
 }
 
 type apiConfig struct {
@@ -125,9 +125,9 @@ func (a *apiConfig) toConfig() (*config.Config, error) {
 			SrcIP: f.SrcIP, DstIP: f.DstIP,
 			SrcPort: f.SrcPort, DstPort: f.DstPort,
 			DSCP:        config.DSCP(dscp),
-			RateMbps:    f.RateMbps,
-			RatePPS:     f.RatePPS,
-			PayloadSize: f.PayloadSize,
+			RateMbps: f.RateMbps,
+			RatePPS:  f.RatePPS,
+			IPLen:    f.IPLen,
 		})
 	}
 	if err := cfg.Validate(); err != nil {
@@ -144,9 +144,9 @@ func (s *Server) configToAPI(cfg *config.Config) apiConfig {
 			SrcIP: f.SrcIP, DstIP: f.DstIP,
 			SrcPort: f.SrcPort, DstPort: f.DstPort,
 			DSCP:        dscpDisplay(f.DSCP),
-			RateMbps:    f.RateMbps,
-			RatePPS:     f.RatePPS,
-			PayloadSize: f.PayloadSize,
+			RateMbps: f.RateMbps,
+			RatePPS:  f.RatePPS,
+			IPLen:    f.IPLen,
 		}
 	}
 	return out

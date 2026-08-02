@@ -71,7 +71,7 @@
     <thead>
       <tr>
         <th>流名</th><th>源 IP</th><th>源端口</th><th>目的 IP</th><th>目的端口</th>
-        <th>DSCP</th><th>带宽 Mbps</th><th>包速率 pps</th><th>载荷字节</th>
+        <th>DSCP</th><th>带宽 Mbps</th><th>包速率 pps</th><th>IP包长度</th>
       </tr>
     </thead>
     <tbody id="cfgBody"></tbody>
@@ -162,7 +162,7 @@ function loadConfig() {
       tr.innerHTML =
         cell('name', f.name) + cell('src_ip', f.src_ip) + cell('src_port', f.src_port) +
         cell('dst_ip', f.dst_ip) + cell('dst_port', f.dst_port) + cell('dscp', f.dscp) +
-        cell('rate_mbps', f.rate_mbps) + cell('rate_pps', f.rate_pps) + cell('payload_size', f.payload_size);
+        cell('rate_mbps', f.rate_mbps) + cell('rate_pps', f.rate_pps) + cell('ip_len', f.ip_len);
       body.appendChild(tr);
     }
     // 最后一列是载荷字节，表头 9 列
@@ -182,7 +182,7 @@ async function applyConfig() {
       dst_ip: get('dst_ip'), dst_port: +get('dst_port'),
       dscp: get('dscp'),
       rate_mbps: +get('rate_mbps') || 0, rate_pps: +get('rate_pps') || 0,
-      payload_size: +get('payload_size') || 0,
+      ip_len: +get('ip_len') || 0,
     });
   }
   try {

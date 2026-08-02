@@ -13,7 +13,7 @@ import (
 func testCfg() *config.Config {
 	return &config.Config{Flows: []config.Flow{
 		{Name: "a", Protocol: "udp", SrcIP: "127.0.0.1", DstIP: "127.0.0.1",
-			SrcPort: 1, DstPort: 2, DSCP: 46, RatePPS: 100, PayloadSize: 64},
+			SrcPort: 1, DstPort: 2, DSCP: 46, RatePPS: 100, IPLen: 92},
 	}}
 }
 
@@ -21,7 +21,7 @@ func testCfg() *config.Config {
 func cfgWithPort(port int) *config.Config {
 	return &config.Config{Flows: []config.Flow{
 		{Name: "a", Protocol: "udp", SrcIP: "127.0.0.1", DstIP: "127.0.0.1",
-			SrcPort: port, DstPort: port + 1, DSCP: 46, RatePPS: 100, PayloadSize: 64},
+			SrcPort: port, DstPort: port + 1, DSCP: 46, RatePPS: 100, IPLen: 92},
 	}}
 }
 

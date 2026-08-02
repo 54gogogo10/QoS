@@ -9,7 +9,7 @@ flows:
     dst_port: 20000
     dscp: EF          # 46
     rate_mbps: 2
-    payload_size: 160
+    ip_len: 188
   - name: 视频-AF41
     protocol: udp
     src_ip: 192.168.1.10
@@ -18,7 +18,7 @@ flows:
     dst_port: 20001
     dscp: AF41        # 34
     rate_mbps: 8
-    payload_size: 1200
+    ip_len: 1228
   - name: 交互-AF31
     protocol: udp
     src_ip: 192.168.1.10
@@ -27,7 +27,7 @@ flows:
     dst_port: 20002
     dscp: AF31        # 26
     rate_mbps: 4
-    payload_size: 512
+    ip_len: 540
   - name: 批量-AF21
     protocol: udp
     src_ip: 192.168.1.10
@@ -36,7 +36,7 @@ flows:
     dst_port: 20003
     dscp: AF21        # 18
     rate_mbps: 10
-    payload_size: 1024
+    ip_len: 1052
   - name: 信令-CS6
     protocol: udp
     src_ip: 192.168.1.10
@@ -45,7 +45,7 @@ flows:
     dst_port: 20004
     dscp: CS6         # 48
     rate_mbps: 1
-    payload_size: 200
+    ip_len: 228
   - name: 视频会议-CS5
     protocol: udp
     src_ip: 192.168.1.10
@@ -54,7 +54,7 @@ flows:
     dst_port: 20005
     dscp: CS5         # 40
     rate_pps: 500
-    payload_size: 300
+    ip_len: 328
   - name: 尽力而为-CS4
     protocol: udp
     src_ip: 192.168.1.10
@@ -63,7 +63,7 @@ flows:
     dst_port: 20006
     dscp: CS4         # 32
     rate_mbps: 20
-    payload_size: 1400
+    ip_len: 1428
   - name: 背景-BE
     protocol: udp
     src_ip: 192.168.1.10
@@ -73,4 +73,4 @@ flows:
     dscp: BE          # 0
     rate_mbps: 30
     rate_pps: 20000
-    payload_size: 1400
+    ip_len: 1428

@@ -19,7 +19,7 @@ type Flow struct {
 	DSCP        DSCP    `yaml:"dscp"`
 	RateMbps    float64 `yaml:"rate_mbps"`
 	RatePPS     float64 `yaml:"rate_pps"`
-	PayloadSize int     `yaml:"payload_size"`
+	IPLen       int     `yaml:"ip_len"` // IP 包总长（IP 头+UDP 头+载荷）
 }
 
 // Config 是一份完整配置，收发两端共用同一份。
@@ -44,16 +44,16 @@ func DefaultConfig() *Config {
 		dscp  int
 		mbps  float64
 		pps   float64
-		psize int
+		ipLen int
 	}{
-		{"语音-EF", 46, 2, 0, 160},
-		{"视频-AF41", 34, 8, 0, 1200},
-		{"交互-AF31", 26, 4, 0, 512},
-		{"批量-AF21", 18, 10, 0, 1024},
-		{"信令-CS6", 48, 1, 0, 200},
-		{"会议-CS5", 40, 0, 500, 300},
-		{"尽力而为-CS4", 32, 20, 0, 1400},
-		{"背景-BE", 0, 0, 20000, 1400},
+		{"语音-EF", 46, 2, 0, 188},    // 原 160 载荷 + 28 IP/UDP 头
+		{"视频-AF41", 34, 8, 0, 1228},
+		{"交互-AF31", 26, 4, 0, 540},
+		{"批量-AF21", 18, 10, 0, 1052},
+		{"信令-CS6", 48, 1, 0, 228},
+		{"会议-CS5", 40, 0, 500, 328},
+		{"尽力而为-CS4", 32, 20, 0, 1428},
+		{"背景-BE", 0, 0, 20000, 1428},
 	}
 	cfg := &Config{}
 	for i, f := range flows {
@@ -61,7 +61,7 @@ func DefaultConfig() *Config {
 			Name: f.name, Protocol: "udp",
 			SrcIP: "127.0.0.1", DstIP: "127.0.0.1",
 			SrcPort: 30000 + i, DstPort: 40000 + i,
-			DSCP: DSCP(f.dscp), RateMbps: f.mbps, RatePPS: f.pps, PayloadSize: f.psize,
+			DSCP: DSCP(f.dscp), RateMbps: f.mbps, RatePPS: f.pps, IPLen: f.ipLen,
 		})
 	}
 	return cfg
@@ -119,12 +119,15 @@ func (c *Config) Validate() error {
 		if f.RateMbps == 0 && f.RatePPS == 0 {
 			return fmt.Errorf("flow %d (%s): rate_mbps 与 rate_pps 至少填一个", i+1, f.Name)
 		}
-		if f.PayloadSize < 0 {
-			return fmt.Errorf("flow %d (%s): payload_size 不能为负", i+1, f.Name)
+		minIPLen := 38 // IPv4: 20 IP + 8 UDP + 10 协议头
+		if src.To4() == nil {
+			minIPLen = 58 // IPv6: 40 + 8 + 10
 		}
-		// 保守使用 IPv4 UDP 载荷上限 65507（IPv6 为 65527，但超出 65507 无实际用途）
-		if f.PayloadSize > 65507 {
-			return fmt.Errorf("flow %d (%s): payload_size %d 超过 UDP 载荷上限 65507", i+1, f.Name, f.PayloadSize)
+		if f.IPLen < minIPLen {
+			return fmt.Errorf("flow %d (%s): ip_len %d 小于最小值 %d（IP/UDP 头 + 10 字节协议头）", i+1, f.Name, f.IPLen, minIPLen)
+		}
+		if f.IPLen > 65535 {
+			return fmt.Errorf("flow %d (%s): ip_len %d 超过上限 65535", i+1, f.Name, f.IPLen)
 		}
 	}
 	return nil

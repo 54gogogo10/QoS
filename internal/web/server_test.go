@@ -17,7 +17,7 @@ import (
 func newTestServer() *Server {
 	cfg := &config.Config{Flows: []config.Flow{
 		{Name: "ef", SrcIP: "1.1.1.1", DstIP: "2.2.2.2", SrcPort: 100, DstPort: 200, DSCP: 46,
-			RateMbps: 1, PayloadSize: 64},
+			RateMbps: 1, IPLen: 92},
 	}}
 	ctrl := controller.New(cfg, controller.ModeBidir)
 	return New(ctrl, "", true)
@@ -93,7 +93,7 @@ func TestAPIConfigRoundTrip(t *testing.T) {
 	}
 	// POST 修改配置（DSCP 用名字，验证解析）
 	body := `{"flows":[{"name":"新流","protocol":"udp","src_ip":"10.0.0.1","dst_ip":"10.0.0.2",
-		"src_port":1111,"dst_port":2222,"dscp":"AF41","rate_mbps":5,"rate_pps":0,"payload_size":100}]}`
+		"src_port":1111,"dst_port":2222,"dscp":"AF41","rate_mbps":5,"rate_pps":0,"ip_len":128}]}`
 	rec2 := httptest.NewRecorder()
 	s.handleConfig(rec2, httptest.NewRequest("POST", "/api/config", strings.NewReader(body)))
 	if rec2.Code != http.StatusOK {
@@ -109,8 +109,8 @@ func TestAPIConfigValidation(t *testing.T) {
 	s := newTestServer()
 	cases := []string{
 		`{"flows":[]}`,
-		`{"flows":[{"name":"a","protocol":"udp","src_ip":"1.1.1.1","dst_ip":"2.2.2.2","src_port":1,"dst_port":2,"dscp":"BAD","rate_pps":100,"payload_size":10}]}`,
-		`{"flows":[{"name":"a","protocol":"tcp","src_ip":"1.1.1.1","dst_ip":"2.2.2.2","src_port":1,"dst_port":2,"dscp":"0","rate_pps":100,"payload_size":10}]}`,
+		`{"flows":[{"name":"a","protocol":"udp","src_ip":"1.1.1.1","dst_ip":"2.2.2.2","src_port":1,"dst_port":2,"dscp":"BAD","rate_pps":100,"ip_len":92}]}`,
+		`{"flows":[{"name":"a","protocol":"tcp","src_ip":"1.1.1.1","dst_ip":"2.2.2.2","src_port":1,"dst_port":2,"dscp":"0","rate_pps":100,"ip_len":92}]}`,
 	}
 	for i, body := range cases {
 		rec := httptest.NewRecorder()

@@ -88,19 +88,20 @@ func newFlow(idx int, cfg config.Flow, agg *stats.Aggregator) (*flow, error) {
 		conn.Close()
 		return nil, fmt.Errorf("设置 DSCP=%d 失败: %w", cfg.DSCP, err)
 	}
-	payload := make([]byte, protocol.HeaderSize+cfg.PayloadSize)
-	protocol.EncodeHeader(payload, uint16(idx), 0)
 	wireOverhead := 28 // IPv4: 20 IP + 8 UDP
 	if net.ParseIP(cfg.SrcIP).To4() == nil {
 		wireOverhead = 48 // IPv6: 40 IP + 8 UDP
 	}
+	// cfg.IPLen 是 IP 包总长：载荷 = IP 包长 - IP/UDP 头
+	payload := make([]byte, cfg.IPLen-wireOverhead)
+	protocol.EncodeHeader(payload, uint16(idx), 0)
 	f := &flow{
 		idx:          idx,
 		conn:         conn,
 		payload:      payload,
 		agg:          agg,
 		wireOverhead: wireOverhead,
-		packetIPSize: len(payload) + wireOverhead,
+		packetIPSize: cfg.IPLen,
 	}
 	f.computePacing(cfg)
 	return f, nil

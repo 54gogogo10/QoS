@@ -24,7 +24,7 @@ func TestSenderPacingLocalhost(t *testing.T) {
 		Name: "t", Protocol: "udp",
 		SrcIP: "127.0.0.1", DstIP: "127.0.0.1",
 		SrcPort: 0, DstPort: dstPort,
-		DSCP: 46, RateMbps: 0, RatePPS: 1000, PayloadSize: 64,
+		DSCP: 46, RateMbps: 0, RatePPS: 1000, IPLen: 92,
 	}}}
 	agg := stats.NewAggregator(1, 10)
 	s, err := New(cfg, agg)
@@ -91,9 +91,9 @@ func TestNewCleansUpOnPartialFailure(t *testing.T) {
 
 	cfg := &config.Config{Flows: []config.Flow{
 		{Name: "f1", Protocol: "udp", SrcIP: "127.0.0.1", DstIP: "127.0.0.1",
-			SrcPort: freePort, DstPort: freePort + 100, DSCP: 46, RatePPS: 10, PayloadSize: 64},
+			SrcPort: freePort, DstPort: freePort + 100, DSCP: 46, RatePPS: 10, IPLen: 92},
 		{Name: "f2", Protocol: "udp", SrcIP: "127.0.0.1", DstIP: "127.0.0.1",
-			SrcPort: blockedPort, DstPort: blockedPort + 100, DSCP: 46, RatePPS: 10, PayloadSize: 64},
+			SrcPort: blockedPort, DstPort: blockedPort + 100, DSCP: 46, RatePPS: 10, IPLen: 92},
 	}}
 	agg := stats.NewAggregator(2, 10)
 	if _, err := New(cfg, agg); err == nil {
