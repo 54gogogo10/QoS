@@ -214,10 +214,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Running       bool      `json:"running"`
 		Iface         string    `json:"iface"`
 		Started       time.Time `json:"started"`
+		LogFile       string    `json:"log_file"`
 		RemoteControl bool      `json:"remote_control"`
 		Mode          string    `json:"mode"`
 	}{
-		Running: st.Running, Iface: st.Iface, Started: st.Started,
+		Running: st.Running, Iface: st.Iface, Started: st.Started, LogFile: st.LogFile,
 		RemoteControl: s.remoteControl, Mode: string(s.ctrl.Mode()),
 	})
 }
