@@ -89,6 +89,7 @@ func runApp() error {
 	}
 
 	ctrl := controller.New(cfg, controller.ModeBidir)
+	ctrl.SetLogDir(filepath.Dir(cfgPath))
 	srv := web.New(ctrl, cfgPath, true)
 	webErr := make(chan error, 1)
 	go func() {
@@ -158,6 +159,7 @@ func runCLI(mode string, args []string) error {
 		ctrlMode = controller.ModeBidir
 	}
 	ctrl := controller.New(cfg, ctrlMode)
+	ctrl.SetLogDir(filepath.Dir(*cfgPath))
 	if err := ctrl.Start(*iface); err != nil {
 		return err
 	}

@@ -251,11 +251,13 @@ async function loadStatus() {
       $('btnStart').disabled = true;
       $('btnStop').disabled = false;
       $('runHint').textContent = '';
+      window._logFile = st.log_file;
     } else {
-      badge.textContent = '未运行';
+      badge.textContent = '已停止';
       badge.className = 'badge stopped';
       $('btnStop').disabled = true;
-      $('runHint').textContent = remoteControl ? '' : '命令行模式：测试由命令行控制，页面只读';
+      $('runHint').textContent = (remoteControl ? '' : '命令行模式：测试由命令行控制，页面只读') +
+        (st.log_file ? ' · 日志: ' + st.log_file : '');
       updateStartButton();
     }
     $('btnApply').disabled = !remoteControl;
