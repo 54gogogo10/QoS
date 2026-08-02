@@ -82,6 +82,10 @@ func (c *Config) Validate() error {
 		if f.PayloadSize < 0 {
 			return fmt.Errorf("flow %d (%s): payload_size 不能为负", i+1, f.Name)
 		}
+		// 保守使用 IPv4 UDP 载荷上限 65507（IPv6 为 65527，但超出 65507 无实际用途）
+		if f.PayloadSize > 65507 {
+			return fmt.Errorf("flow %d (%s): payload_size %d 超过 UDP 载荷上限 65507", i+1, f.Name, f.PayloadSize)
+		}
 	}
 	return nil
 }

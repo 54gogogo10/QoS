@@ -93,3 +93,13 @@ func TestTotals(t *testing.T) {
 		t.Fatalf("Totals = %d %d %d", tx, rx, lost)
 	}
 }
+func TestSeqWraparound(t *testing.T) {
+	a := NewAggregator(1, 10)
+	a.RecordRx(0, 100, math.MaxUint32-1)
+	a.RecordRx(0, 100, math.MaxUint32)
+	a.RecordRx(0, 100, 1) // 回绕
+	snap := a.Current(time.Now())
+	if snap[0].Lost != 0 {
+		t.Fatalf("回绕后 Lost = %d, want 0（已知限制：seq 回绕不计丢失）", snap[0].Lost)
+	}
+}

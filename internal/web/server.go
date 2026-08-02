@@ -77,6 +77,10 @@ type apiHistory struct {
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	now := time.Now()
 	snap := s.agg.Current(now)
 	hist := s.agg.History()

@@ -49,12 +49,13 @@ func (s *Sender) Run(ctx context.Context) {
 }
 
 type flow struct {
-	idx     int
-	conn    *net.UDPConn
-	bucket  *bucket
-	payload []byte
-	seq     uint32
-	agg     *stats.Aggregator
+	idx          int
+	conn         *net.UDPConn
+	bucket       *bucket
+	payload      []byte
+	seq          uint32
+	agg          *stats.Aggregator
+	wireOverhead int
 }
 
 func newFlow(idx int, cfg config.Flow, agg *stats.Aggregator) (*flow, error) {
@@ -70,12 +71,17 @@ func newFlow(idx int, cfg config.Flow, agg *stats.Aggregator) (*flow, error) {
 	}
 	payload := make([]byte, protocol.HeaderSize+cfg.PayloadSize)
 	protocol.EncodeHeader(payload, uint16(idx), 0)
+	wireOverhead := 28 // IPv4: 20 IP + 8 UDP
+	if net.ParseIP(cfg.SrcIP).To4() == nil {
+		wireOverhead = 48 // IPv6: 40 IP + 8 UDP
+	}
 	return &flow{
-		idx:     idx,
-		conn:    conn,
-		bucket:  newBucket(cfg.RateMbps, cfg.RatePPS, defaultTick),
-		payload: payload,
-		agg:     agg,
+		idx:          idx,
+		conn:         conn,
+		bucket:       newBucket(cfg.RateMbps, cfg.RatePPS, defaultTick),
+		payload:      payload,
+		agg:          agg,
+		wireOverhead: wireOverhead,
 	}, nil
 }
 
@@ -101,7 +107,7 @@ func (f *flow) run(ctx context.Context) {
 			}
 		}
 		if n > 0 {
-			f.agg.RecordTx(f.idx, uint64(n), uint64(n*len(f.payload)))
+			f.agg.RecordTx(f.idx, uint64(n), uint64(n*(len(f.payload)+f.wireOverhead)))
 		}
 	}
 }

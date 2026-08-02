@@ -20,10 +20,12 @@ func reportLoop(ctx context.Context, cfg *config.Config, agg *stats.Aggregator,
 	var lastDraw time.Time
 	for {
 		next = next.Add(interval)
+		timer := time.NewTimer(time.Until(next))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-time.After(time.Until(next)):
+		case <-timer.C:
 		}
 		agg.Snapshot(time.Now())
 

@@ -60,6 +60,8 @@ func (b *bucket) take(now time.Time, bytes int) int {
 		n = min(n, int(b.tokensB/float64(bytes)))
 	}
 	b.tokensP -= float64(n)
-	b.tokensB -= float64(n * bytes)
+	if b.rateBps > 0 {
+		b.tokensB -= float64(n * bytes)
+	}
 	return n
 }
