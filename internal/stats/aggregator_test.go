@@ -71,6 +71,17 @@ func TestHistoryCap(t *testing.T) {
 	}
 }
 
+func TestRecordOutOfRangeFlowIdx(t *testing.T) {
+	a := NewAggregator(1, 10)
+	a.RecordTx(99, 1, 1)
+	a.RecordRx(99, 1, 1)
+	a.RecordTx(-1, 1, 1)
+	a.RecordRx(-1, 1, 1)
+	if tx, rx, lost := a.Totals(); tx != 0 || rx != 0 || lost != 0 {
+		t.Fatalf("越界 flowIdx 不应计入统计: Totals = %d %d %d", tx, rx, lost)
+	}
+}
+
 func TestTotals(t *testing.T) {
 	a := NewAggregator(2, 10)
 	a.RecordTx(0, 5, 500)

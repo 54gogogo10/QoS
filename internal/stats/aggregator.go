@@ -75,14 +75,22 @@ func NewAggregator(nFlows, histCap int) *Aggregator {
 }
 
 // RecordTx 发送端每发出 n 个包（共 bytes 字节）调用一次。
+// flowIdx 超出 [0, nFlows) 时直接忽略（调用方 bug 防御，不 panic）。
 func (a *Aggregator) RecordTx(flowIdx int, n, bytes uint64) {
+	if flowIdx < 0 || flowIdx >= a.nFlows {
+		return
+	}
 	a.txPkts[flowIdx].Add(n)
 	a.txB[flowIdx].Add(bytes)
 }
 
 // RecordRx 抓包端每命中一个包调用一次。
 // seq 大于 lastSeq 时，中间跳过的序号计为丢失；小于等于视为乱序/重传，不计数。
+// flowIdx 超出 [0, nFlows) 时直接忽略（调用方 bug 防御，不 panic）。
 func (a *Aggregator) RecordRx(flowIdx int, bytes uint64, seq uint32) {
+	if flowIdx < 0 || flowIdx >= a.nFlows {
+		return
+	}
 	a.rxPkts[flowIdx].Add(1)
 	a.rxB[flowIdx].Add(bytes)
 	last := a.lastSeq[flowIdx].Load()
