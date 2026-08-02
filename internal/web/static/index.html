@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>qostool 实时监控</title>
+<style>
+  body { font-family: "Microsoft YaHei", sans-serif; background:#111; color:#ddd; margin:16px; }
+  h1 { font-size:18px; }
+  #chart { width:100%; height:320px; background:#1a1a1a; }
+  table { border-collapse:collapse; width:100%; margin-top:12px; font-size:13px; }
+  th, td { border:1px solid #333; padding:4px 8px; text-align:right; }
+  th { background:#222; }
+  td:first-child, th:first-child { text-align:left; }
+  tr.loss td { color:#ff5555; }
+  .legend span { display:inline-block; margin-right:14px; font-size:12px; }
+  .sw { display:inline-block; width:10px; height:10px; margin-right:4px; }
+</style>
+</head>
+<body>
+<h1>qostool QoS 实时监控 <span id="clock"></span></h1>
+<div class="legend" id="legend"></div>
+<canvas id="chart"></canvas>
+<table id="tbl">
+<thead><tr>
+  <th>流</th><th>DSCP</th><th>5元组</th>
+  <th>TX Mbps</th><th>TX pps</th><th>RX Mbps</th><th>RX pps</th>
+  <th>TX 包</th><th>RX 包</th><th>丢失</th><th>丢包率</th>
+</tr></thead>
+<tbody></tbody>
+</table>
+<script>
+const COLORS = ["#e6194B","#3cb44b","#ffe119","#4363d8","#f58231","#911eb4","#42d4f4","#f032e6"];
+const WINDOW = 300; // 显示最近 300 个采样点
+const canvas = document.getElementById('chart');
+const ctx = canvas.getContext('2d');
+
+function resize() {
+  canvas.width = canvas.clientWidth * devicePixelRatio;
+  canvas.height = canvas.clientHeight * devicePixelRatio;
+}
+
+function drawChart(hist) {
+  resize();
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  const W = canvas.width, H = canvas.height;
+  const n = Math.min(hist.t.length, WINDOW);
+  if (n < 2) return;
+  let max = 1;
+  for (let f = 0; f < hist.tx.length; f++) {
+    const tx = hist.tx[f], rx = hist.rx[f];
+    for (let i = tx.length - n; i < tx.length; i++) {
+      max = Math.max(max, tx[i], rx[i]);
+    }
+  }
+  ctx.strokeStyle = "#333"; ctx.lineWidth = 1;
+  for (let g = 0; g <= 4; g++) {
+    const y = H - 20 - g / 4 * (H - 40);
+    ctx.beginPath(); ctx.moveTo(40, y); ctx.lineTo(W, y); ctx.stroke();
+    ctx.fillStyle = "#888"; ctx.font = "11px sans-serif";
+    ctx.fillText((max * g / 4 * 8 / 1e6).toFixed(2) + " Mbps", 2, y + 4);
+  }
+  const plot = (arr, color, dash) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+    ctx.setLineDash(dash);
+    ctx.beginPath();
+    for (let i = 0; i < n; i++) {
+      const v = arr[i];
+      const px = 40 + i / (n - 1) * (W - 40);
+      const py = H - 20 - (v / max) * (H - 40);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  };
+  for (let f = 0; f < hist.tx.length; f++) {
+    plot(hist.tx[f].slice(-n), COLORS[f % 8], []);
+    plot(hist.rx[f].slice(-n), COLORS[f % 8], [4, 3]);
+  }
+}
+
+function renderTable(flows) {
+  const tbody = document.querySelector('#tbl tbody');
+  tbody.innerHTML = '';
+  const fmt = v => v >= 1e9 ? (v/1e9).toFixed(2)+'G' : v >= 1e6 ? (v/1e6).toFixed(2)+'M'
+             : v >= 1e3 ? (v/1e3).toFixed(2)+'K' : v;
+  for (const f of flows) {
+    const tr = document.createElement('tr');
+    if (f.loss_rate > 0) tr.className = 'loss';
+    tr.innerHTML =
+      `<td>${f.name}</td><td>${f.dscp}</td><td>${f.src_ip}:${f.src_port}->${f.dst_ip}:${f.dst_port}</td>` +
+      `<td>${(f.tx_bps*8/1e6).toFixed(2)}</td><td>${f.tx_pps.toFixed(0)}</td>` +
+      `<td>${(f.rx_bps*8/1e6).toFixed(2)}</td><td>${f.rx_pps.toFixed(0)}</td>` +
+      `<td>${fmt(f.tx_packets)}</td><td>${fmt(f.rx_packets)}</td>` +
+      `<td>${fmt(f.lost)}</td><td>${(f.loss_rate*100).toFixed(2)}%</td>`;
+    tbody.appendChild(tr);
+  }
+}
+
+async function tick() {
+  try {
+    const r = await fetch('/api/stats');
+    const d = await r.json();
+    document.getElementById('clock').textContent = new Date(d.now).toLocaleTimeString();
+    drawChart(d.history);
+    renderTable(d.flows);
+  } catch (e) { /* 服务未就绪，稍后重试 */ }
+  setTimeout(tick, 500);
+}
+
+const legend = document.getElementById('legend');
+for (let i = 0; i < 8; i++) {
+  const s = document.createElement('span');
+  s.innerHTML = `<span class="sw" style="background:${COLORS[i]}"></span>flow${i+1} TX/虚线RX`;
+  legend.appendChild(s);
+}
+tick();
+</script>
+</body>
+</html>
