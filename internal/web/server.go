@@ -162,7 +162,7 @@ func dscpDisplay(d config.DSCP) string {
 
 func (s *Server) requireControl(w http.ResponseWriter, r *http.Request) bool {
 	if !s.remoteControl {
-		http.Error(w, "命令行模式下页面控制已禁用", http.StatusForbidden)
+		writeJSONError(w, http.StatusForbidden, "命令行模式下页面控制已禁用")
 		return false
 	}
 	return true
@@ -252,23 +252,23 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		}
 		var in apiConfig
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-			http.Error(w, "请求体解析失败: "+err.Error(), http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 			return
 		}
 		cfg, err := in.toConfig()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		if s.cfgPath != "" {
 			if err := cfg.Save(s.cfgPath); err != nil {
-				http.Error(w, "保存配置文件失败: "+err.Error(), http.StatusInternalServerError)
+				writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
 				return
 			}
 		}
 		restarted, err := s.ctrl.UpdateConfig(cfg)
 		if err != nil {
-			http.Error(w, "应用配置失败: "+err.Error(), http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, "应用配置失败: "+err.Error())
 			return
 		}
 		writeJSON(w, struct {
@@ -293,15 +293,15 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		Iface string `json:"iface"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		http.Error(w, "请求体解析失败: "+err.Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 		return
 	}
 	if in.Iface == "" {
-		http.Error(w, "缺少 iface 参数", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "缺少 iface 参数")
 		return
 	}
 	if err := s.ctrl.Start(in.Iface); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, struct {
@@ -342,4 +342,13 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(v)
+}
+
+// writeJSONError 以 JSON 格式返回错误（前端可直接读取 error 字段）。
+func writeJSONError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	json.NewEncoder(w).Encode(struct {
+		Error string `json:"error"`
+	}{Error: msg})
 }

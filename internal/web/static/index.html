@@ -124,8 +124,23 @@ async function loadInterfaces(select) {
     }
     if (prev) sel.value = prev;
     if (!sel.value && devs.length) sel.value = devs[0].name;
+    if (!devs.length) {
+      showMsg('未发现可用接口：请确认已安装 Npcap 并以管理员身份运行', true);
+    }
     if (select && sel.value) applyIface();
-  } catch (e) { showMsg('枚举接口失败: ' + e.message, true); }
+  } catch (e) {
+    showMsg('枚举接口失败: ' + e.message + '（请确认已安装 Npcap）', true);
+  }
+  updateStartButton();
+}
+
+// updateStartButton 根据接口是否已选决定开始按钮可用性。
+function updateStartButton() {
+  const hasIface = $('iface').options.length > 0;
+  $('btnStart').disabled = !hasIface || !remoteControl;
+  if (!hasIface && remoteControl) {
+    $('runHint').textContent = '未发现接口——请安装/启动 Npcap 后点"刷新"';
+  }
 }
 
 function applyIface() {
@@ -185,17 +200,24 @@ async function applyConfig() {
 
 async function doStart() {
   const iface = $('iface').value;
-  if (!iface) { showMsg('请先选择监听接口', true); return; }
+  if (!iface) { showMsg('请先选择监听接口（点"刷新"重新枚举）', true); return; }
   applyIface();
+  $('btnStart').disabled = true;
+  $('btnStart').textContent = '启动中...';
   try {
     const r = await fetch('/api/start', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({iface}),
     });
     const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.error || r.statusText);
+    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
     showMsg('测试已启动（接口 ' + iface + '）', false);
-  } catch (e) { showMsg('启动失败: ' + e.message, true); }
+  } catch (e) {
+    showMsg('启动失败: ' + e.message, true);
+  } finally {
+    $('btnStart').textContent = '开始测试';
+    loadStatus(); // 立即刷新状态（若已运行则按钮由 loadStatus 保持禁用）
+  }
 }
 
 async function doStop() {
@@ -223,9 +245,9 @@ async function loadStatus() {
     } else {
       badge.textContent = '未运行';
       badge.className = 'badge stopped';
-      $('btnStart').disabled = !remoteControl;
       $('btnStop').disabled = true;
       $('runHint').textContent = remoteControl ? '' : '命令行模式：测试由命令行控制，页面只读';
+      updateStartButton();
     }
     $('btnApply').disabled = !remoteControl;
     $('iface').disabled = !remoteControl;
@@ -323,6 +345,7 @@ function showMsg(text, isErr) {
   const m = $('msg');
   m.textContent = text;
   m.className = isErr ? 'err' : 'ok';
+  m.style.fontWeight = isErr ? 'bold' : 'normal';
 }
 
 // ---------- 初始化 ----------
@@ -331,7 +354,7 @@ $('btnStart').onclick = doStart;
 $('btnStop').onclick = doStop;
 $('btnApply').onclick = applyConfig;
 $('btnRefreshIface').onclick = () => loadInterfaces(false);
-$('iface').onchange = applyIface;
+$('iface').onchange = () => { applyIface(); updateStartButton(); };
 
 // 图例（按实际流数生成，最多 8）
 function buildLegend(n) {
