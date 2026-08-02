@@ -1,0 +1,23 @@
+# 示例配置：bidir 环回自测直接用本文件（src/dst 均为 127.0.0.1）。
+# 双端测试时把 src_ip/dst_ip 改成两端实际地址即可。
+flows:
+  - name: EF-语音
+    protocol: udp
+    src_ip: 127.0.0.1
+    dst_ip: 127.0.0.1
+    src_port: 10000
+    dst_port: 20000
+    dscp: 46
+    rate_mbps: 1
+    rate_pps: 1000
+    payload_size: 128
+  - name: AF11-视频
+    protocol: udp
+    src_ip: 127.0.0.1
+    dst_ip: 127.0.0.1
+    src_port: 10001
+    dst_port: 20001
+    dscp: 10
+    rate_mbps: 2
+    rate_pps: 500
+    payload_size: 512
