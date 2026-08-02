@@ -8,7 +8,7 @@
   * { box-sizing: border-box; }
   body { font-family: "Microsoft YaHei", sans-serif; background:var(--bg); color:var(--fg); margin:0; padding:12px 16px; }
   h1 { font-size:17px; margin:0; display:inline; }
-  .header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:10px; }
+  .header { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:4px; }
   .badge { font-size:12px; padding:2px 10px; border-radius:10px; background:#333; }
   .badge.running { background:#1e5e1e; color:#7dff7d; }
   .badge.stopped { background:#5e1e1e; color:#ff7d7d; }
@@ -38,9 +38,9 @@
   table.stats th { background:#222; }
   table.stats td:first-child, table.stats th:first-child { text-align:left; }
   tr.loss td { color:var(--red); }
-  #msg { font-size:13px; min-height:18px; margin:6px 0 0; }
-  #msg.err { color:var(--red); }
-  #msg.ok { color:#7dff7d; }
+  #msg { font-size:14px; min-height:20px; margin:6px 0 8px; padding:6px 10px; border-radius:4px; background:#1a1a1a; }
+  #msg.err { color:var(--red); border:1px solid #5e1e1e; background:#2a1212; }
+  #msg.ok { color:#7dff7d; border:1px solid #1e5e1e; background:#122a12; }
   .row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
   .hint { font-size:12px; color:#888; }
 </style>
@@ -52,6 +52,7 @@
   <span class="badge stopped" id="badge">未运行</span>
   <span id="clock" class="hint"></span>
 </div>
+<p id="msg"></p>
 
 <div class="panel">
   <div class="row">
@@ -93,7 +94,6 @@
     </tr></thead>
     <tbody id="statsBody"></tbody>
   </table>
-  <p id="msg"></p>
 </div>
 
 <script>
@@ -204,17 +204,24 @@ async function doStart() {
   applyIface();
   $('btnStart').disabled = true;
   $('btnStart').textContent = '启动中...';
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 8000);
   try {
     const r = await fetch('/api/start', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({iface}),
+      body: JSON.stringify({iface}), signal: ac.signal,
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
     showMsg('测试已启动（接口 ' + iface + '）', false);
   } catch (e) {
-    showMsg('启动失败: ' + e.message, true);
+    const msg = e.name === 'AbortError'
+      ? '启动超时：接口无响应，请换一个接口（推荐 NPF_Loopback 或真实网卡）重试'
+      : ('启动失败: ' + e.message);
+    showMsg(msg, true);
+    alert(msg);
   } finally {
+    clearTimeout(timer);
     $('btnStart').textContent = '开始测试';
     loadStatus(); // 立即刷新状态（若已运行则按钮由 loadStatus 保持禁用）
   }
@@ -345,7 +352,7 @@ function showMsg(text, isErr) {
   const m = $('msg');
   m.textContent = text;
   m.className = isErr ? 'err' : 'ok';
-  m.style.fontWeight = isErr ? 'bold' : 'normal';
+  m.style.display = 'block';
 }
 
 // ---------- 初始化 ----------

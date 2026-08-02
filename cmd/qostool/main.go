@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -73,6 +74,15 @@ func runApp() error {
 	if err != nil {
 		return err
 	}
+	// windowsgui 模式无控制台：把日志写入 exe 同目录 qostool.log
+	logFile, err := os.OpenFile(filepath.Join(filepath.Dir(cfgPath), "qostool.log"),
+		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err == nil {
+		log.SetOutput(logFile)
+		defer logFile.Close()
+	}
+	log.Printf("qostool app 启动, 配置: %s", cfgPath)
+
 	cfg, err := loadOrCreateConfig(cfgPath)
 	if err != nil {
 		return err
