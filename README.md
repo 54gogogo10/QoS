@@ -4,6 +4,15 @@
 接收端按 DSCP + 5 元组精确匹配，实时统计每条流的收发速率与丢包率。
 提供终端实时表格与 Web 曲线页面（默认端口 16666）。
 
+## Windows 7 版本
+
+`qostool-win7.exe`（x86_64）使用 Go 1.20 工具链编译，兼容 Windows 7 SP1。
+
+- **仅命令行模式**：`qostool-win7.exe send/recv/bidir -c flows.yaml -i 接口`
+- Windows 7 **不支持 WebView2**：双击 exe 不会弹内嵌窗口，页面操作需在 Win7 上安装现代浏览器（Chrome/Edge 等）后访问 http://127.0.0.1:16666
+- 抓包需安装支持 Win7 的 **Npcap 版本**（1.7x 或更早，https://npcap.com 下载旧版；或 WinPcap）
+- 发送流量（send 模式）不依赖 Npcap
+
 ## 麒麟 V10 / Linux 版本
 
 `qostool-linux-amd64`（x86_64：兆芯/海光/Intel）与 `qostool-linux-arm64`（鲲鹏/飞腾）为
