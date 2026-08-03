@@ -4,9 +4,11 @@ package sender
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
+	"syscall"
 	"time"
 
 	"qostool/internal/config"
@@ -148,7 +150,12 @@ func (f *flow) run(ctx context.Context) {
 			f.seq++
 			binary.BigEndian.PutUint32(f.payload[protocol.HeaderSize-4:protocol.HeaderSize], f.seq)
 			if _, err := f.conn.Write(f.payload); err != nil {
-				return // 对端不可达等错误：停止该流
+				// Linux：UDP connect 到未监听端口会收到 ICMP port unreachable，
+				// 后续 Write 返回 ECONNREFUSED——但包已实际发出（ICMP 为异步返回），不能停流。
+				if errors.Is(err, syscall.ECONNREFUSED) {
+					continue
+				}
+				return // 其他错误：停止该流
 			}
 		}
 		f.agg.RecordTx(f.idx, uint64(f.batch), uint64(f.batch*(len(f.payload)+f.wireOverhead)))

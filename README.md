@@ -4,6 +4,20 @@
 接收端按 DSCP + 5 元组精确匹配，实时统计每条流的收发速率与丢包率。
 提供终端实时表格与 Web 曲线页面（默认端口 16666）。
 
+## 麒麟 V10 / Linux 版本
+
+`qostool-linux-amd64`（x86_64：兆芯/海光/Intel）与 `qostool-linux-arm64`（鲲鹏/飞腾）为
+**纯 Go 静态编译**（零外部依赖、无 libpcap），Linux 接收端使用 AF_PACKET 原始套接字抓包。
+
+```bash
+sudo ./qostool lsdev                    # 查看接口（eth0/lo 等）
+sudo ./qostool bidir -c config.yaml -i eth0   # 双向测试（抓包需要 root）
+```
+
+- 无内嵌窗口（Linux 版打开页面自动调用系统默认浏览器）
+- 建议双机测试：发送机与接收机各跑一份，配置中 src/dst 填实际 IP
+- 麒麟 V10 需以 root 或 sudo 运行（AF_PACKET 抓包权限要求，与 tcpdump 相同）
+
 ## 两种使用方式
 
 **桌面应用（推荐）**：双击 `qostool-app.exe` → 弹出内嵌窗口（无需浏览器），

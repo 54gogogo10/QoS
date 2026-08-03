@@ -10,8 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gopacket/gopacket/pcap"
-
 	"qostool/internal/config"
 	"qostool/internal/controller"
 )
@@ -55,6 +53,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // ---------- API 结构 ----------
+
+// apiIface 是接口信息（API 返回结构），由平台文件 listInterfaces() 填充。
+type apiIface struct {
+	Name        string   `json:"name"`
+	Description string   `json:"description"`
+	Addresses   []string `json:"addresses"`
+}
 
 type apiStats struct {
 	Now     int64      `json:"now"`
@@ -228,27 +233,12 @@ func (s *Server) handleInterfaces(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	devs, err := pcap.FindAllDevs()
+	devs, err := listInterfaces()
 	if err != nil {
 		http.Error(w, "枚举接口失败: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	type apiIface struct {
-		Name        string   `json:"name"`
-		Description string   `json:"description"`
-		Addresses   []string `json:"addresses"`
-	}
-	out := make([]apiIface, 0, len(devs))
-	for _, d := range devs {
-		addrs := make([]string, 0, len(d.Addresses))
-		for _, a := range d.Addresses {
-			if a.IP != nil && a.IP.String() != "0.0.0.0" && a.IP.String() != "::" {
-				addrs = append(addrs, a.IP.String())
-			}
-		}
-		out = append(out, apiIface{Name: d.Name, Description: d.Description, Addresses: addrs})
-	}
-	writeJSON(w, out)
+	writeJSON(w, devs)
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {

@@ -13,8 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gopacket/gopacket/pcap"
-
 	"qostool/internal/config"
 	"qostool/internal/controller"
 	"qostool/internal/report"
@@ -200,16 +198,9 @@ func runCLI(mode string, args []string) error {
 	return nil
 }
 
-// listDevices 打印 pcap 可用的接口（Windows 上是 GUID 名，帮助用户选 -i）。
+// listDevices 打印可用的抓包接口（平台实现：Windows=Npcap / Linux=net.Interfaces）。
 func listDevices() error {
-	devs, err := pcap.FindAllDevs()
-	if err != nil {
-		return err
-	}
-	for _, d := range devs {
-		fmt.Printf("%s\t%s\n", d.Name, d.Description)
-	}
-	return nil
+	return listDevicesPlatform()
 }
 
 // resolveConfigPath 返回配置文件路径：exe 同目录 config.yaml，
