@@ -108,7 +108,14 @@ func (s *Server) ListenAndServe(addr string) error {
 	mux.HandleFunc("/api/iface", s.handleIfaceSel)
 	mux.HandleFunc("/api/tx_stats", s.handleTxStats)
 	mux.HandleFunc("/", s.handleIndex)
-	s.srv = &http.Server{Addr: addr, Handler: mux}
+	s.srv = &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	if _, p, err := net.SplitHostPort(addr); err == nil {
 		s.port = p
 	} else {
@@ -369,8 +376,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var in apiConfig
-		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+		if !decodeJSON(w, r, &in) {
 			return
 		}
 		requireRates := m != controller.ModeRecv
@@ -413,8 +419,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		Mode      string   `json:"mode"`
 		Receivers []string `json:"receivers"` // 勾选的接收端地址（发送端推送监听命令）
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+	if !decodeJSON(w, r, &in) {
 		return
 	}
 	m := modeFromString(in.Mode)
@@ -484,7 +489,9 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Mode string `json:"mode"`
 	}
-	json.NewDecoder(r.Body).Decode(&in)
+	if !decodeJSON(w, r, &in) {
+		return
+	}
 	log.Printf("[web] handleStop mode=%s", in.Mode)
 	s.ctrl(modeFromString(in.Mode)).Stop()
 	writeJSON(w, struct {
@@ -514,8 +521,7 @@ func (s *Server) handleIfaceSel(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Iface string `json:"iface"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+	if !decodeJSON(w, r, &in) {
 		return
 	}
 	if in.Iface == "" {
@@ -629,8 +635,7 @@ func (s *Server) handleRemote(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Addr string `json:"addr"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+	if !decodeJSON(w, r, &in) {
 		return
 	}
 	in.Addr = strings.TrimSpace(in.Addr)
@@ -786,6 +791,24 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write(data)
+}
+
+// decodeJSON 安全解析 JSON 请求体：
+// ① 校验 Content-Type 为 application/json（阻止跨站表单伪造的简单请求 → 防 CSRF）
+// ② 限制请求体 1MB（防超大 body 内存 DoS）
+// 返回 false 表示已写出错误响应。
+func decodeJSON(w http.ResponseWriter, r *http.Request, v interface{}) bool {
+	ct := r.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "application/json") {
+		writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type 必须是 application/json")
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+		return false
+	}
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
