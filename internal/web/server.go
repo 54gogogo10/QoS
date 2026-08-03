@@ -106,11 +106,19 @@ type apiIface struct {
 }
 
 type apiStats struct {
-	Now     int64           `json:"now"`
-	Running bool            `json:"running"`
-	Flows   []apiFlow       `json:"flows"`
-	History apiHistory      `json:"history"`
-	Remote  *remoteSnapshot `json:"remote,omitempty"`
+	Now       int64           `json:"now"`
+	Running   bool            `json:"running"`
+	Flows     []apiFlow       `json:"flows"`
+	History   apiHistory      `json:"history"`
+	Remote    *remoteSnapshot `json:"remote,omitempty"`
+	IfaceStat *ifaceStat      `json:"iface_stat,omitempty"` // 接口级抓包统计（诊断用）
+}
+
+// ifaceStat 是接口级抓包统计的 API 结构。
+type ifaceStat struct {
+	TotalPkts   uint64 `json:"total_pkts"`
+	MatchedPkts uint64 `json:"matched_pkts"`
+	OtherPkts   uint64 `json:"other_pkts"`
 }
 
 type apiFlow struct {
@@ -263,6 +271,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		out.Remote = s.remoteData
 	}
 	s.remoteMu.Unlock()
+	// 接口级抓包统计：诊断"网卡有流量但 RX 为 0"
+	if m != controller.ModeSend {
+		st := ctrl.IfaceStats()
+		if st.TotalPkts > 0 {
+			out.IfaceStat = &ifaceStat{TotalPkts: st.TotalPkts, MatchedPkts: st.MatchedPkts, OtherPkts: st.OtherPkts}
+		}
+	}
 	writeJSON(w, out)
 }
 

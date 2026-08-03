@@ -109,6 +109,7 @@
   <h2>实时速率曲线（TX 实线 / RX 虚线）</h2>
   <div class="legend" id="legend"></div>
   <canvas id="chart"></canvas>
+  <div id="ifaceStat" class="hint" style="margin-top:6px; display:none"></div>
   <table class="stats resizable" id="statsTable">
     <thead><tr>
       <th>流</th><th>DSCP</th><th>5元组</th>
@@ -582,6 +583,25 @@ function applyStatsColumnVisibility() {
   });
 }
 
+// updateIfaceStat 显示接口级抓包统计（诊断"网卡有流量但 RX 为 0"）。
+function updateIfaceStat(st, running) {
+  const el = $('ifaceStat');
+  if (currentMode === 'send' || !st) { el.style.display = 'none'; return; }
+  el.style.display = '';
+  const total = st.total_pkts, matched = st.matched_pkts, other = st.other_pkts;
+  let tip = '接口流量: 总计 ' + fmt(total) + ' 包 | 匹配 ' + fmt(matched) + ' | 其他 ' + fmt(other);
+  if (total > 0 && matched === 0) {
+    tip += ' ← 流量与配置不匹配：请核对 5 元组（IP/端口）和 DSCP，或确认对端是 qostool 发送';
+    el.style.color = '#ffb020';
+  } else if (total === 0 && running) {
+    tip += ' ← 接口上未抓到任何 IP 包：请确认监听接口正确';
+    el.style.color = '#ffb020';
+  } else {
+    el.style.color = '#888';
+  }
+  el.textContent = tip;
+}
+
 // updateRemoteStatus 显示接收端与发送端的连接状态。
 function updateRemoteStatus(remote) {
   const el = $('remoteStatus');
@@ -608,6 +628,7 @@ async function tick() {
     drawChart(d.history);
     renderTable(d.flows, d.running, d.remote);
     updateRemoteStatus(d.remote);
+    updateIfaceStat(d.iface_stat, d.running);
   } catch (e) { /* 服务未就绪 */ }
   setTimeout(tick, 500);
 }

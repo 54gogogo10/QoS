@@ -53,6 +53,7 @@ type Controller struct {
 
 	senderCancel  context.CancelFunc // 发送 goroutine 的取消（先停）
 	captureCancel context.CancelFunc // 接收 goroutine 的取消（后停）
+	cap           *capture.Capturer  // 当前抓包器（IfaceStats 诊断用）
 	iface         string
 	running       bool
 	started       time.Time
@@ -133,6 +134,7 @@ func (c *Controller) Stop() {
 	savedAgg := c.agg
 	c.lastAgg = c.agg // 保留最后数据，停止后页面仍可查看
 	c.agg = nil
+	c.cap = nil
 	c.started = time.Time{}
 	stopped := time.Now()
 	c.mu.Unlock()
@@ -223,6 +225,16 @@ func (c *Controller) Aggregator() *stats.Aggregator {
 	return c.lastAgg
 }
 
+// IfaceStats 返回接口级抓包统计；未抓包时返回零值。
+func (c *Controller) IfaceStats() capture.IfaceStats {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cap == nil {
+		return capture.IfaceStats{}
+	}
+	return c.cap.Stats()
+}
+
 // Status 返回当前状态。
 func (c *Controller) Status() Status {
 	c.mu.Lock()
@@ -272,6 +284,7 @@ func (c *Controller) startLocked(iface string) error {
 	}
 
 	c.agg, c.iface, c.running, c.started = agg, iface, true, time.Now()
+	c.cap = cap
 	c.lastAgg = nil // 新一轮测试开始，清掉上一轮数据
 	c.senderCancel, c.captureCancel = sCancel, cCancel
 	if c.logDir != "" {

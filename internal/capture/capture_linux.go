@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"github.com/gopacket/gopacket/layers"
@@ -30,6 +31,26 @@ type Capturer struct {
 	matcher *matcher
 	agg     *stats.Aggregator
 	iface   string
+
+	totalPkts   atomic.Uint64 // 接口上抓到的 IP 包总数（含所有协议）
+	matchedPkts atomic.Uint64 // 匹配配置且校验通过的包数
+	otherPkts   atomic.Uint64 // 抓到但未匹配/无 magic 的包数
+}
+
+// IfaceStats 是接口级抓包统计（诊断"网卡有流量但 RX 为 0"用）。
+type IfaceStats struct {
+	TotalPkts   uint64 `json:"total_pkts"`
+	MatchedPkts uint64 `json:"matched_pkts"`
+	OtherPkts   uint64 `json:"other_pkts"`
+}
+
+// Stats 返回接口级抓包统计。
+func (c *Capturer) Stats() IfaceStats {
+	return IfaceStats{
+		TotalPkts:   c.totalPkts.Load(),
+		MatchedPkts: c.matchedPkts.Load(),
+		OtherPkts:   c.otherPkts.Load(),
+	}
 }
 
 // New 打开接口的 AF_PACKET 原始套接字。
@@ -97,14 +118,18 @@ func (c *Capturer) Run(ctx context.Context) error {
 			if err != nil {
 				continue
 			}
+			c.totalPkts.Add(1)
 			idx := c.matcher.match(pkt.key)
 			if idx < 0 {
+				c.otherPkts.Add(1)
 				continue
 			}
 			fid, seq, ok := protocol.DecodeHeader(pkt.payload)
 			if !ok || int(fid) != idx {
-				continue // 非本工具流量或 flow_id 不一致
+				c.otherPkts.Add(1) // 非本工具流量或 flow_id 不一致
+				continue
 			}
+			c.matchedPkts.Add(1)
 			c.agg.RecordRx(idx, uint64(len(ip)), seq)
 		}
 		select {
