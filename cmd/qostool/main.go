@@ -21,7 +21,8 @@ import (
 )
 
 const (
-	defaultWebAddr = "127.0.0.1:16666"
+	defaultWebAddr = ":16666"        // 监听所有接口（跨机器访问/远端同步需要）
+	localhostURL  = "http://127.0.0.1:16666"
 	histCap        = 3000
 )
 
@@ -109,7 +110,7 @@ func runApp() error {
 	if w == nil {
 		// WebView2 运行时不可用：兜底用系统默认浏览器打开页面
 		fmt.Fprintln(os.Stderr, "警告: WebView2 运行时不可用，改用系统浏览器打开")
-		openBrowser("http://" + defaultWebAddr)
+		openBrowser(localhostURL)
 		<-webErr // 等待 Web 服务退出（Ctrl+C）
 		for _, c := range ctrls {
 			c.Stop()
@@ -120,7 +121,7 @@ func runApp() error {
 
 	w.SetTitle("qostool - QoS 测试工具")
 	w.SetSize(1280, 820, hintNone)
-	w.Navigate("http://" + defaultWebAddr)
+	w.Navigate(localhostURL)
 	w.Run()
 
 	for _, c := range ctrls {
