@@ -570,6 +570,16 @@ func (s *Server) recordReceiver(r *http.Request) {
 	s.receiversMu.Unlock()
 }
 
+// RemoteTXProvider 返回当前同步到的远端发送端 TX 数据（recv 模式日志/汇总用）。
+func (s *Server) RemoteTXProvider() (pps []float64, pkts, bytes []uint64, ok bool) {
+	s.remoteMu.Lock()
+	defer s.remoteMu.Unlock()
+	if s.remoteData == nil || !s.remoteData.Online {
+		return nil, nil, nil, false
+	}
+	return s.remoteData.TxPps, s.remoteData.TxPkts, s.remoteData.TxBytes, true
+}
+
 // NotifyAllReceivers 推送监听命令到所有在线接收端（CLI 发送端启动时用）。
 func (s *Server) NotifyAllReceivers() {
 	s.receiversMu.Lock()

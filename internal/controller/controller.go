@@ -55,6 +55,7 @@ type Controller struct {
 	senderCancel  context.CancelFunc // 发送 goroutine 的取消（先停）
 	captureCancel context.CancelFunc // 接收 goroutine 的取消（后停）
 	cap           *capture.Capturer  // 当前抓包器（IfaceStats 诊断用）
+	remoteTX      RemoteTXFunc       // 远端发送端 TX 数据提供者（recv 模式日志用）
 	iface         string
 	running       bool
 	started       time.Time
@@ -69,6 +70,17 @@ type Controller struct {
 // New 创建控制器。
 func New(cfg *config.Config, mode Mode) *Controller {
 	return &Controller{cfg: cfg, mode: mode, drainDelay: drainDelay}
+}
+
+// RemoteTXFunc 返回远端发送端的 TX 统计（pps/包数/字节），ok=false 表示无远端数据。
+type RemoteTXFunc func() (pps []float64, pkts, bytes []uint64, ok bool)
+
+// SetRemoteTXProvider 设置远端发送端 TX 数据提供者：
+// recv 模式写日志/汇总时，TX 列用远端发送端的数据（而非本端 0）。
+func (c *Controller) SetRemoteTXProvider(fn RemoteTXFunc) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.remoteTX = fn
 }
 
 // SetLogDir 启用统计日志：每次运行在 <dir>/logs/ 下生成
@@ -368,6 +380,7 @@ func (c *Controller) writeLogRow(now time.Time, agg *stats.Aggregator) {
 		return
 	}
 	snap := agg.Current(now)
+	c.applyRemoteTX(snap)
 	rec := []string{now.Format("2006-01-02 15:04:05")}
 	for _, s := range snap {
 		rec = append(rec, fmt.Sprintf("%d", int(s.TxPps+0.5)))
@@ -380,6 +393,28 @@ func (c *Controller) writeLogRow(now time.Time, agg *stats.Aggregator) {
 	}
 	c.csvW.Write(rec)
 	c.csvW.Flush()
+}
+
+// applyRemoteTX 用远端发送端数据覆盖快照的 TX 字段（recv 模式本端 TX 恒为 0）。
+func (c *Controller) applyRemoteTX(snap []stats.FlowSnapshot) {
+	if c.remoteTX == nil {
+		return
+	}
+	pps, pkts, bytes, ok := c.remoteTX()
+	if !ok {
+		return
+	}
+	for i := range snap {
+		if i < len(pps) {
+			snap[i].TxPps = pps[i]
+		}
+		if i < len(pkts) {
+			snap[i].TxPackets = pkts[i]
+		}
+		if i < len(bytes) {
+			snap[i].TxBytes = bytes[i]
+		}
+	}
 }
 
 // closeLogLocked 关闭 CSV 并写出汇总 txt（调用方持有锁）。
@@ -399,7 +434,28 @@ func (c *Controller) closeLogLocked(agg *stats.Aggregator, started time.Time, if
 		return
 	}
 	snap := agg.Current(stopped)
+	c.applyRemoteTX(snap)
 	txTotal, rxTotal, lost := agg.Totals()
+	// 远端 TX 覆盖后重新计算总发送
+	if c.remoteTX != nil {
+		if _, pkts, bytes, ok := c.remoteTX(); ok {
+			var t uint64
+			for i := range pkts {
+				if i < len(bytes) {
+					t += bytes[i]
+				} else {
+					t += pkts[i] * uint64(92) // 未知包长时按 92 估算
+				}
+			}
+			_ = t
+			// 用各流 TxBytes 求和更准确
+			t = 0
+			for i := range snap {
+				t += snap[i].TxBytes
+			}
+			txTotal = t
+		}
+	}
 	dur := stopped.Sub(started).Round(time.Second)
 	var b []byte
 	b = append(b, fmt.Sprintf("qostool 运行汇总\n")...)

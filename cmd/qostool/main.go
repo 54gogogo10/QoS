@@ -99,6 +99,10 @@ func runApp() error {
 		ctrls[m] = ctrl
 	}
 	srv := web.New(ctrls, cfgPaths, true)
+	// recv 模式日志/汇总的 TX 列使用远端发送端数据（而非本端 0）
+	if ctrl := ctrls[controller.ModeRecv]; ctrl != nil {
+		ctrl.SetRemoteTXProvider(srv.RemoteTXProvider)
+	}
 	webErr := make(chan error, 1)
 	go func() {
 		if err := srv.ListenAndServe(defaultWebAddr); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -213,6 +217,9 @@ func runCLI(mode string, args []string) error {
 				*remote += ":16666"
 			}
 			srv.SetRemote(*remote)
+		}
+		if ctrlMode == controller.ModeRecv {
+			ctrl.SetRemoteTXProvider(srv.RemoteTXProvider)
 		}
 		go func() {
 			if err := srv.ListenAndServe(":" + *webPort); err != nil && !errors.Is(err, http.ErrServerClosed) {
