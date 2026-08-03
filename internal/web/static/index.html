@@ -164,7 +164,7 @@ function applyIface() {
 // ---------- 配置表单 ----------
 
 function loadConfig() {
-  fetch('/api/config').then(r => r.json()).then(cfg => {
+  fetch('/api/config?mode=' + currentMode).then(r => r.json()).then(cfg => {
     buildLegend(cfg.flows);
     const body = $('cfgBody');
     body.innerHTML = '';
@@ -248,7 +248,7 @@ async function applyConfig() {
     flows.push(flow);
   }
   try {
-    const r = await fetch('/api/config', {
+    const r = await fetch('/api/config?mode=' + currentMode, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({flows}),
@@ -264,19 +264,12 @@ async function applyConfig() {
 
 let currentMode = 'bidir';
 
-// setRole 切换角色（发送/接收/双向）并刷新界面。
-async function setRole(role) {
+// setRole 切换面板（三种角色独立运行、独立配置，互不干扰）。
+function setRole(role) {
   currentMode = role;
-  try {
-    const r = await fetch('/api/mode', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({mode: role}),
-    });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.error || 'HTTP ' + r.status);
-    showMsg('已切换为' + (role === 'send' ? '发送端（只发送）' : role === 'recv' ? '接收端（只监听）' : '双向（收发）'), false);
-  } catch (e) { showMsg('切换角色失败: ' + e.message, true); }
   refreshRoleUI();
+  loadConfig();
+  loadStatus();
 }
 
 // refreshRoleUI 按角色显示/隐藏接口选择与发送端地址，并调整按钮文案。
@@ -314,7 +307,7 @@ async function doStart() {
   try {
     const r = await fetch('/api/start', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({iface}), signal: ac.signal,
+      body: JSON.stringify({iface, mode: currentMode}), signal: ac.signal,
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
@@ -349,9 +342,12 @@ async function setRemote() {
 
 async function doStop() {
   try {
-    const r = await fetch('/api/stop', {method: 'POST'});
+    const r = await fetch('/api/stop', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode: currentMode}),
+    });
     if (!r.ok) throw new Error(r.statusText);
-    showMsg('测试已停止', false);
+    showMsg('已停止', false);
   } catch (e) { showMsg('停止失败: ' + e.message, true); }
 }
 
@@ -359,23 +355,28 @@ async function doStop() {
 
 async function loadStatus() {
   try {
-    const r = await fetch('/api/status');
+    const r = await fetch('/api/status?mode=' + currentMode);
     const st = await r.json();
     remoteControl = st.remote_control;
+    const cur = st[currentMode] || {running: false, iface: '', log_file: ''};
     const badge = $('badge');
-    if (st.running) {
-      badge.textContent = '运行中 ' + (st.iface || '') + ' · ' + new Date(st.started).toLocaleTimeString();
+    if (cur.running) {
+      badge.textContent = '运行中 ' + (cur.iface || '') + ' · ' + new Date(cur.started).toLocaleTimeString();
       badge.className = 'badge running';
       $('btnStart').disabled = true;
       $('btnStop').disabled = false;
       $('runHint').textContent = '';
-      window._logFile = st.log_file;
+      window._logFile = cur.log_file;
     } else {
       badge.textContent = '已停止';
       badge.className = 'badge stopped';
       $('btnStop').disabled = true;
-      $('runHint').textContent = (remoteControl ? '' : '命令行模式：测试由命令行控制，页面只读') +
-        (st.log_file ? ' · 日志: ' + st.log_file : '');
+      const others = [];
+      if (st.send && st.send.running) others.push('发送端运行中');
+      if (st.recv && st.recv.running) others.push('接收端运行中');
+      if (st.bidir && st.bidir.running) others.push('双向运行中');
+      $('runHint').textContent = (others.length ? '【' + others.join(' / ') + '】' : '') +
+        (cur.log_file ? ' · 日志: ' + cur.log_file : '');
       updateStartButton();
     }
     $('btnApply').disabled = !remoteControl;
@@ -493,7 +494,7 @@ let lastStats = {flows: [], history: {t: [], tx: [], rx: []}};
 
 async function tick() {
   try {
-    const r = await fetch('/api/stats');
+    const r = await fetch('/api/stats?mode=' + currentMode);
     const d = await r.json();
     lastStats = d;
     document.getElementById('clock').textContent = new Date(d.now).toLocaleTimeString();

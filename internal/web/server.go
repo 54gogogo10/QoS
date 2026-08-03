@@ -20,9 +20,9 @@ var staticFS embed.FS
 
 // Server 提供页面与 JSON API：监控 + 运行控制（接口选择、启停、配置编辑）。
 type Server struct {
-	ctrl          *controller.Controller
-	cfgPath       string // 配置持久化路径；空串表示不保存
-	remoteControl bool   // true=页面可启停/改配置（app 模式）；false=只读监控（CLI 模式）
+	ctrls         map[controller.Mode]*controller.Controller // 每角色独立实例
+	cfgPaths      map[controller.Mode]string                // 每角色独立配置文件
+	remoteControl bool                                      // true=页面可启停/改配置（app 模式）；false=只读监控（CLI 模式）
 	srv           *http.Server
 
 	remoteMu          sync.Mutex
@@ -43,9 +43,21 @@ type remoteSnapshot struct {
 	TxBytes []uint64  `json:"tx_bytes"`
 }
 
-// New 创建 Web 服务。
-func New(ctrl *controller.Controller, cfgPath string, remoteControl bool) *Server {
-	return &Server{ctrl: ctrl, cfgPath: cfgPath, remoteControl: remoteControl}
+// New 创建 Web 服务：send/recv/bidir 三个独立实例与独立配置文件。
+func New(ctrls map[controller.Mode]*controller.Controller, cfgPaths map[controller.Mode]string, remoteControl bool) *Server {
+	return &Server{ctrls: ctrls, cfgPaths: cfgPaths, remoteControl: remoteControl}
+}
+
+// ctrl 返回指定角色的控制器（CLI 单实例模式下返回唯一实例）。
+func (s *Server) ctrl(m controller.Mode) *controller.Controller {
+	if c := s.ctrls[m]; c != nil {
+		return c
+	}
+	// 兼容单实例（CLI）：任意模式返回唯一实例
+	for _, c := range s.ctrls {
+		return c
+	}
+	return nil
 }
 
 // SetRemote 设置发送端地址（IP:port），供 CLI 模式通过 --remote 参数使用。
@@ -145,7 +157,7 @@ type apiConfig struct {
 }
 
 // toConfig 把 API 配置转成内部配置并校验。
-func (a *apiConfig) toConfig() (*config.Config, error) {
+func (a *apiConfig) toConfig(requireRates bool) (*config.Config, error) {
 	if len(a.Flows) == 0 {
 		return nil, fmt.Errorf("flows 不能为空")
 	}
@@ -168,7 +180,11 @@ func (a *apiConfig) toConfig() (*config.Config, error) {
 			IPLen:    f.IPLen,
 		})
 	}
-	if err := cfg.Validate(); err != nil {
+	if requireRates {
+		if err := cfg.Validate(); err != nil {
+			return nil, err
+		}
+	} else if err := cfg.ValidateRecv(); err != nil {
 		return nil, err
 	}
 	return cfg, nil
@@ -212,10 +228,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	m := modeFromQuery(r)
+	ctrl := s.ctrl(m)
 	now := time.Now()
-	agg := s.ctrl.Aggregator()
-	cfg := s.ctrl.Config()
-	status := s.ctrl.Status()
+	agg := ctrl.Aggregator()
+	cfg := ctrl.Config()
+	status := ctrl.Status()
 	out := apiStats{
 		Now:     now.UnixMilli(),
 		Running: status.Running,
@@ -253,18 +271,35 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	st := s.ctrl.Status()
-	writeJSON(w, struct {
-		Running       bool      `json:"running"`
-		Iface         string    `json:"iface"`
-		Started       time.Time `json:"started"`
-		LogFile       string    `json:"log_file"`
-		RemoteControl bool      `json:"remote_control"`
-		Mode          string    `json:"mode"`
+	type roleStatus struct {
+		Running bool      `json:"running"`
+		Iface   string    `json:"iface"`
+		Started time.Time `json:"started"`
+		LogFile string    `json:"log_file"`
+	}
+	out := struct {
+		Send          roleStatus `json:"send"`
+		Recv          roleStatus `json:"recv"`
+		Bidir         roleStatus `json:"bidir"`
+		RemoteControl bool       `json:"remote_control"`
+		Mode          string     `json:"mode"`
 	}{
-		Running: st.Running, Iface: st.Iface, Started: st.Started, LogFile: st.LogFile,
-		RemoteControl: s.remoteControl, Mode: string(s.ctrl.Mode()),
-	})
+		RemoteControl: s.remoteControl,
+		Mode:          r.URL.Query().Get("mode"),
+	}
+	for _, m := range []controller.Mode{controller.ModeSend, controller.ModeRecv, controller.ModeBidir} {
+		st := s.ctrl(m).Status()
+		rs := roleStatus{Running: st.Running, Iface: st.Iface, Started: st.Started, LogFile: st.LogFile}
+		switch m {
+		case controller.ModeSend:
+			out.Send = rs
+		case controller.ModeRecv:
+			out.Recv = rs
+		case controller.ModeBidir:
+			out.Bidir = rs
+		}
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) handleInterfaces(w http.ResponseWriter, r *http.Request) {
@@ -281,9 +316,11 @@ func (s *Server) handleInterfaces(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	m := modeFromQuery(r)
+	ctrl := s.ctrl(m)
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
-		writeJSON(w, s.configToAPI(s.ctrl.Config()))
+		writeJSON(w, s.configToAPI(ctrl.Config()))
 	case http.MethodPost:
 		if !s.requireControl(w, r) {
 			return
@@ -293,18 +330,19 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 			writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 			return
 		}
-		cfg, err := in.toConfig()
+		requireRates := m != controller.ModeRecv
+		cfg, err := in.toConfig(requireRates)
 		if err != nil {
 			writeJSONError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		if s.cfgPath != "" {
-			if err := cfg.Save(s.cfgPath); err != nil {
+		if p := s.cfgPaths[m]; p != "" {
+			if err := cfg.Save(p); err != nil {
 				writeJSONError(w, http.StatusInternalServerError, "保存配置文件失败: "+err.Error())
 				return
 			}
 		}
-		restarted, err := s.ctrl.UpdateConfig(cfg)
+		restarted, err := ctrl.UpdateConfig(cfg)
 		if err != nil {
 			writeJSONError(w, http.StatusInternalServerError, "应用配置失败: "+err.Error())
 			return
@@ -329,18 +367,21 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	var in struct {
 		Iface string `json:"iface"`
+		Mode  string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 		return
 	}
-	if in.Iface == "" {
+	m := modeFromString(in.Mode)
+	ctrl := s.ctrl(m)
+	if in.Iface == "" && m != controller.ModeSend {
 		writeJSONError(w, http.StatusBadRequest, "缺少 iface 参数")
 		return
 	}
-	// 诊断：回环配置 + 非回环接口 → 必然收不到流量，提前给出明确提示
-	if !isLoopbackIface(in.Iface) {
-		for _, f := range s.ctrl.Config().Flows {
+	// 诊断：回环配置 + 非回环接口 → 必然收不到流量，提前给出明确提示（发送角色不抓包，跳过）
+	if m != controller.ModeSend && !isLoopbackIface(in.Iface) {
+		for _, f := range ctrl.Config().Flows {
 			if isLoopbackIP(f.SrcIP) || isLoopbackIP(f.DstIP) {
 				writeJSONError(w, http.StatusBadRequest,
 					"配置的流量目标是回环地址（"+f.SrcIP+"→"+f.DstIP+"），但所选接口 "+in.Iface+" 不是 Npcap 回环适配器，收不到流量。\n请选择 'Adapter for loopback traffic capture'（NPF_Loopback），或把配置改成实际 IP")
@@ -348,14 +389,14 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	if err := s.ctrl.Start(in.Iface); err != nil {
+	if err := ctrl.Start(in.Iface); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, struct {
 		OK      bool   `json:"ok"`
 		Message string `json:"message"`
-	}{OK: true, Message: "测试已启动"})
+	}{OK: true, Message: "已启动"})
 }
 
 func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
@@ -366,50 +407,24 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 	if !s.requireControl(w, r) {
 		return
 	}
-	s.ctrl.Stop()
+	var in struct {
+		Mode string `json:"mode"`
+	}
+	json.NewDecoder(r.Body).Decode(&in)
+	s.ctrl(modeFromString(in.Mode)).Stop()
 	writeJSON(w, struct {
 		OK      bool   `json:"ok"`
 		Message string `json:"message"`
-	}{OK: true, Message: "测试已停止"})
+	}{OK: true, Message: "已停止"})
 }
 
 // handleMode 切换角色：send（只发送）/ recv（只监听）/ bidir（双向）。
 func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if !s.requireControl(w, r) {
-		return
-	}
-	var in struct {
-		Mode string `json:"mode"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
-		return
-	}
-	var m controller.Mode
-	switch in.Mode {
-	case "send":
-		m = controller.ModeSend
-	case "recv":
-		m = controller.ModeRecv
-	case "bidir":
-		m = controller.ModeBidir
-	default:
-		writeJSONError(w, http.StatusBadRequest, "mode 必须是 send/recv/bidir")
-		return
-	}
-	if err := s.ctrl.SetMode(m); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	writeJSON(w, struct {
-		OK      bool   `json:"ok"`
-		Mode    string `json:"mode"`
-		Message string `json:"message"`
-	}{OK: true, Mode: in.Mode, Message: "角色已切换"})
+		OK      bool     `json:"ok"`
+		Message string   `json:"message"`
+		Modes   []string `json:"modes"`
+	}{OK: true, Message: "角色已独立运行，无需切换", Modes: []string{"send", "recv", "bidir"}})
 }
 
 // handleRemote 设置发送端地址（接收端拉取其 TX 统计并统一显示）。
@@ -515,14 +530,21 @@ func (s *Server) startRemoteLoop() {
 	}()
 }
 
-// handleTxStats 供远端接收端拉取本端 TX 统计（发送端角色）。
+// handleTxStats 供远端接收端拉取本端 TX 统计：
+// 优先返回发送端角色（send）的运行数据，其次双向（bidir）；均未运行时返回空。
 func (s *Server) handleTxStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	agg := s.ctrl.Aggregator()
-	st := s.ctrl.Status()
+	var ctrl *controller.Controller
+	for _, m := range []controller.Mode{controller.ModeSend, controller.ModeBidir} {
+		c := s.ctrl(m)
+		if c.Status().Running {
+			ctrl = c
+			break
+		}
+	}
 	out := struct {
 		Running bool      `json:"running"`
 		TxBps   []float64 `json:"tx_bps"`
@@ -530,16 +552,19 @@ func (s *Server) handleTxStats(w http.ResponseWriter, r *http.Request) {
 		TxPkts  []uint64  `json:"tx_packets"`
 		TxBytes []uint64  `json:"tx_bytes"`
 	}{
-		Running: st.Running,
 		TxBps:   []float64{}, TxPps: []float64{}, TxPkts: []uint64{}, TxBytes: []uint64{},
 	}
-	if agg != nil {
-		snap := agg.Current(time.Now())
-		for i := range snap {
-			out.TxBps = append(out.TxBps, snap[i].TxBps)
-			out.TxPps = append(out.TxPps, snap[i].TxPps)
-			out.TxPkts = append(out.TxPkts, snap[i].TxPackets)
-			out.TxBytes = append(out.TxBytes, snap[i].TxBytes)
+	if ctrl != nil {
+		out.Running = true
+		agg := ctrl.Aggregator()
+		if agg != nil {
+			snap := agg.Current(time.Now())
+			for i := range snap {
+				out.TxBps = append(out.TxBps, snap[i].TxBps)
+				out.TxPps = append(out.TxPps, snap[i].TxPps)
+				out.TxPkts = append(out.TxPkts, snap[i].TxPackets)
+				out.TxBytes = append(out.TxBytes, snap[i].TxBytes)
+			}
 		}
 	}
 	writeJSON(w, out)
@@ -580,4 +605,21 @@ func writeJSONError(w http.ResponseWriter, code int, msg string) {
 	json.NewEncoder(w).Encode(struct {
 		Error string `json:"error"`
 	}{Error: msg})
+}
+
+// modeFromQuery 从查询参数取角色；缺省 bidir。
+func modeFromQuery(r *http.Request) controller.Mode {
+	return modeFromString(r.URL.Query().Get("mode"))
+}
+
+// modeFromString 解析角色字符串；空或非法返回 bidir。
+func modeFromString(m string) controller.Mode {
+	switch m {
+	case "send":
+		return controller.ModeSend
+	case "recv":
+		return controller.ModeRecv
+	default:
+		return controller.ModeBidir
+	}
 }

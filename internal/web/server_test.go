@@ -19,8 +19,12 @@ func newTestServer() *Server {
 		{Name: "ef", SrcIP: "1.1.1.1", DstIP: "2.2.2.2", SrcPort: 100, DstPort: 200, DSCP: 46,
 			RateMbps: 1, IPLen: 92},
 	}}
-	ctrl := controller.New(cfg, controller.ModeBidir)
-	return New(ctrl, "", true)
+	ctrls := map[controller.Mode]*controller.Controller{
+		controller.ModeSend:  controller.New(cfg, controller.ModeSend),
+		controller.ModeRecv:  controller.New(cfg, controller.ModeRecv),
+		controller.ModeBidir: controller.New(cfg, controller.ModeBidir),
+	}
+	return New(ctrls, map[controller.Mode]string{}, true)
 }
 
 // injectAgg 把预置统计的聚合器注入控制器（不启动真实测试）。
@@ -30,7 +34,7 @@ func injectAgg(s *Server) {
 	agg.RecordRx(0, 500, 1)
 	agg.RecordRx(0, 500, 5)
 	agg.Snapshot(time.Now())
-	s.ctrl.SetAggregatorForTest(agg)
+	s.ctrl(controller.ModeBidir).SetAggregatorForTest(agg)
 }
 
 func TestAPIStats(t *testing.T) {
@@ -67,7 +71,9 @@ func TestAPIStatsNotRunning(t *testing.T) {
 	cfg := &config.Config{Flows: []config.Flow{
 		{Name: "ef", SrcIP: "1.1.1.1", DstIP: "2.2.2.2", SrcPort: 100, DstPort: 200, DSCP: 46, RateMbps: 1},
 	}}
-	s := New(controller.New(cfg, controller.ModeBidir), "", true)
+	s := New(map[controller.Mode]*controller.Controller{
+		controller.ModeBidir: controller.New(cfg, controller.ModeBidir),
+	}, map[controller.Mode]string{}, true)
 	rec := httptest.NewRecorder()
 	s.handleStats(rec, httptest.NewRequest("GET", "/api/stats", nil))
 	var out apiStats
@@ -99,7 +105,7 @@ func TestAPIConfigRoundTrip(t *testing.T) {
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("POST 配置 code = %d, body=%s", rec2.Code, rec2.Body.String())
 	}
-	cfg := s.ctrl.Config()
+	cfg := s.ctrl(controller.ModeBidir).Config()
 	if len(cfg.Flows) != 1 || int(cfg.Flows[0].DSCP) != 34 || cfg.Flows[0].Name != "新流" {
 		t.Fatalf("配置未生效: %+v", cfg.Flows)
 	}
@@ -125,7 +131,9 @@ func TestControlDisabledInCLIMode(t *testing.T) {
 	cfg := &config.Config{Flows: []config.Flow{
 		{Name: "ef", SrcIP: "1.1.1.1", DstIP: "2.2.2.2", SrcPort: 100, DstPort: 200, DSCP: 46, RateMbps: 1},
 	}}
-	s := New(controller.New(cfg, controller.ModeBidir), "", false) // CLI 模式
+	s := New(map[controller.Mode]*controller.Controller{
+		controller.ModeBidir: controller.New(cfg, controller.ModeBidir),
+	}, map[controller.Mode]string{}, false) // CLI 模式
 	rec := httptest.NewRecorder()
 	s.handleStart(rec, httptest.NewRequest("POST", "/api/start", strings.NewReader(`{"iface":"x"}`)))
 	if rec.Code != http.StatusForbidden {

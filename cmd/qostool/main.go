@@ -68,28 +68,36 @@ func usage() {
 }
 
 // runApp 桌面应用模式：内嵌 WebView2 窗口 + 本地 Web 服务（仅 127.0.0.1）。
+// 三种角色（发送/接收/双向）各自独立的运行实例与配置文件，互不干扰。
 func runApp() error {
-	cfgPath, err := resolveConfigPath()
+	cfgDir, err := resolveConfigDir()
 	if err != nil {
 		return err
 	}
 	// windowsgui 模式无控制台：把日志写入 exe 同目录 qostool.log
-	logFile, err := os.OpenFile(filepath.Join(filepath.Dir(cfgPath), "qostool.log"),
+	logFile, err := os.OpenFile(filepath.Join(cfgDir, "qostool.log"),
 		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err == nil {
 		log.SetOutput(logFile)
 		defer logFile.Close()
 	}
-	log.Printf("qostool app 启动, 配置: %s", cfgPath)
+	log.Printf("qostool app 启动, 配置目录: %s", cfgDir)
 
-	cfg, err := loadOrCreateConfig(cfgPath)
-	if err != nil {
-		return err
+	// 三个角色独立实例 + 独立配置文件
+	ctrls := map[controller.Mode]*controller.Controller{}
+	cfgPaths := map[controller.Mode]string{}
+	for _, m := range []controller.Mode{controller.ModeSend, controller.ModeRecv, controller.ModeBidir} {
+		p := filepath.Join(cfgDir, cfgNameForMode(m))
+		cfgPaths[m] = p
+		cfg, err := loadOrCreateConfig(p, m)
+		if err != nil {
+			return err
+		}
+		ctrl := controller.New(cfg, m)
+		ctrl.SetLogDir(cfgDir)
+		ctrls[m] = ctrl
 	}
-
-	ctrl := controller.New(cfg, controller.ModeBidir)
-	ctrl.SetLogDir(filepath.Dir(cfgPath))
-	srv := web.New(ctrl, cfgPath, true)
+	srv := web.New(ctrls, cfgPaths, true)
 	webErr := make(chan error, 1)
 	go func() {
 		if err := srv.ListenAndServe(defaultWebAddr); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -103,7 +111,9 @@ func runApp() error {
 		fmt.Fprintln(os.Stderr, "警告: WebView2 运行时不可用，改用系统浏览器打开")
 		openBrowser("http://" + defaultWebAddr)
 		<-webErr // 等待 Web 服务退出（Ctrl+C）
-		ctrl.Stop()
+		for _, c := range ctrls {
+			c.Stop()
+		}
 		return nil
 	}
 	defer w.Destroy()
@@ -113,11 +123,25 @@ func runApp() error {
 	w.Navigate("http://" + defaultWebAddr)
 	w.Run()
 
-	ctrl.Stop()
+	for _, c := range ctrls {
+		c.Stop()
+	}
 	sc, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	srv.Shutdown(sc)
 	cancel()
 	return nil
+}
+
+// cfgNameForMode 每种角色的独立配置文件。
+func cfgNameForMode(m controller.Mode) string {
+	switch m {
+	case controller.ModeSend:
+		return "config-send.yaml"
+	case controller.ModeRecv:
+		return "config-recv.yaml"
+	default:
+		return "config.yaml"
+	}
 }
 
 // runCLI 命令行模式：send/recv/bidir。
@@ -181,7 +205,8 @@ func runCLI(mode string, args []string) error {
 
 	var srv *web.Server
 	if *webPort != "off" {
-		srv = web.New(ctrl, "", false) // CLI 模式下页面只读
+		srv = web.New(map[controller.Mode]*controller.Controller{ctrlMode: ctrl},
+			map[controller.Mode]string{ctrlMode: *cfgPath}, false) // CLI 模式下页面只读
 		if *remote != "" {
 			if !strings.Contains(*remote, ":") {
 				*remote += ":16666"
@@ -219,40 +244,56 @@ func listDevices() error {
 	return listDevicesPlatform()
 }
 
-// resolveConfigPath 返回配置文件路径：exe 同目录 config.yaml，
-// 无写权限时退回用户主目录。
-func resolveConfigPath() (string, error) {
+// resolveConfigDir 返回配置目录：exe 同目录，无写权限时退回用户主目录 ~/.qostool。
+func resolveConfigDir() (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", err
 	}
 	dir := filepath.Dir(exe)
-	p := filepath.Join(dir, "config.yaml")
+	p := filepath.Join(dir, ".qostool-write-test")
 	if err := os.WriteFile(p, []byte{}, 0o644); err == nil {
 		os.Remove(p)
-		return p, nil
+		return dir, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", fmt.Errorf("无法确定配置文件位置: %w", err)
+		return "", fmt.Errorf("无法确定配置目录: %w", err)
 	}
 	hd := filepath.Join(home, ".qostool")
 	if err := os.MkdirAll(hd, 0o755); err != nil {
 		return "", err
 	}
-	return filepath.Join(hd, "config.yaml"), nil
+	return hd, nil
 }
 
-// loadOrCreateConfig 加载配置文件；不存在或非法时用内置默认配置并落盘。
-func loadOrCreateConfig(path string) (*config.Config, error) {
+// loadOrCreateConfig 按角色加载配置文件；不存在或非法时用内置默认配置并落盘。
+// 接收端角色使用宽松校验（无需速率/包长），默认配置为无速率版本。
+func loadOrCreateConfig(path string, m controller.Mode) (*config.Config, error) {
 	if _, err := os.Stat(path); err == nil {
-		cfg, err := config.Load(path)
+		var cfg *config.Config
+		var err error
+		if m == controller.ModeRecv {
+			cfg, err = config.LoadRecv(path)
+		} else {
+			cfg, err = config.Load(path)
+		}
 		if err == nil {
 			return cfg, nil
 		}
 		fmt.Fprintln(os.Stderr, "警告: 配置文件无效，使用内置默认配置:", err)
 	}
-	cfg := config.DefaultConfig()
+	var cfg *config.Config
+	if m == controller.ModeRecv {
+		cfg = config.DefaultConfig()
+		for i := range cfg.Flows {
+			cfg.Flows[i].RateMbps = 0
+			cfg.Flows[i].RatePPS = 0
+			cfg.Flows[i].IPLen = 0
+		}
+	} else {
+		cfg = config.DefaultConfig()
+	}
 	if err := cfg.Save(path); err != nil {
 		return nil, fmt.Errorf("写入默认配置 %s 失败: %w", path, err)
 	}
