@@ -34,6 +34,16 @@
   .legend span { display:inline-block; margin-right:12px; }
   .sw { display:inline-block; width:10px; height:10px; margin-right:4px; vertical-align:middle; }
   table.stats { border-collapse:collapse; width:100%; margin-top:8px; font-size:12px; }
+  /* 可拖动列宽 */
+  table.resizable { table-layout: fixed; }
+  table.resizable th { position: relative; overflow: hidden; }
+  table.resizable th .resizer {
+    position: absolute; right: -3px; top: 0; width: 7px; height: 100%;
+    cursor: col-resize; user-select: none; z-index: 2;
+  }
+  table.resizable th .resizer:hover { background: rgba(255,255,255,0.2); }
+  table.resizable th .resizer.active { background: var(--accent); }
+  table.resizable td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   table.stats th, table.stats td { border:1px solid var(--border); padding:3px 8px; text-align:right; }
   table.stats th { background:#222; }
   table.stats td:first-child, table.stats th:first-child { text-align:left; }
@@ -77,7 +87,7 @@
 
 <div class="panel">
   <h2>流量配置（8 条流 · 5 元组 / DSCP / 双速率限速）</h2>
-  <table class="cfg-table">
+  <table class="cfg-table resizable" id="cfgTable">
     <thead>
       <tr>
         <th>流名</th><th>源 IP</th><th>源端口</th><th>目的 IP</th><th>目的端口</th>
@@ -99,7 +109,7 @@
   <h2>实时速率曲线（TX 实线 / RX 虚线）</h2>
   <div class="legend" id="legend"></div>
   <canvas id="chart"></canvas>
-  <table class="stats">
+  <table class="stats resizable" id="statsTable">
     <thead><tr>
       <th>流</th><th>DSCP</th><th>5元组</th>
       <th id="thTxMbps">TX Mbps</th><th id="thTxPps">TX pps</th><th>RX Mbps</th><th>RX pps</th>
@@ -188,6 +198,55 @@ function loadConfig() {
     }
     applyRateColumnVisibility(); // 表格填充后按角色隐藏速率列
   }).catch(e => showMsg('加载配置失败: ' + e.message, true));
+}
+
+// initTableResize 初始化可拖动列宽（colgroup 控制宽度，localStorage 记忆）。
+// 返回 {cols} 供隐藏列时同步操作。
+function initTableResize(tableId, storageKey, defaultWidths) {
+  const table = document.getElementById(tableId);
+  const headRow = table.querySelector('thead tr');
+  const nCols = headRow.children.length;
+  const saved = null;
+  let savedArr = null;
+  try { savedArr = JSON.parse(localStorage.getItem(storageKey)); } catch (e) {}
+  const colgroup = document.createElement('colgroup');
+  const cols = [];
+  for (let i = 0; i < nCols; i++) {
+    const col = document.createElement('col');
+    const w = (savedArr && savedArr[i]) || defaultWidths[i] || 80;
+    col.style.width = w + 'px';
+    colgroup.appendChild(col);
+    cols.push(col);
+  }
+  table.insertBefore(colgroup, table.firstChild);
+  [...headRow.children].forEach((th, i) => {
+    const resizer = document.createElement('div');
+    resizer.className = 'resizer';
+    th.appendChild(resizer);
+    let startX = 0, startW = 80;
+    resizer.addEventListener('mousedown', e => {
+      e.preventDefault();
+      startX = e.clientX;
+      startW = parseInt(cols[i].style.width) || 80;
+      resizer.classList.add('active');
+      document.body.style.userSelect = 'none';
+      const onMove = ev => {
+        const w = Math.max(40, startW + ev.clientX - startX);
+        cols[i].style.width = w + 'px';
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        resizer.classList.remove('active');
+        document.body.style.userSelect = '';
+        const arr = cols.map(c => parseInt(c.style.width) || 80);
+        try { localStorage.setItem(storageKey, JSON.stringify(arr)); } catch (e) {}
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  });
+  return { table, cols };
 }
 
 // linkRates 联动带宽与包速率：改一个自动换算另一个（基于本行 ip_len）。
@@ -299,6 +358,10 @@ function applyRateColumnVisibility() {
   $('thRatePps').style.display = hideRates ? 'none' : '';
   $('thIPLen').style.display = hideRates ? 'none' : '';
   document.querySelectorAll('#cfgBody td.rate').forEach(td => td.style.display = hideRates ? 'none' : '');
+  // 同步隐藏 colgroup 对应列（避免隐藏列残留宽度）
+  RATE_COL_IDX.forEach(i => {
+    if (cfgResize.cols[i]) cfgResize.cols[i].style.display = hideRates ? 'none' : '';
+  });
 }
 
 async function doStart() {
@@ -536,6 +599,12 @@ function showMsg(text, isErr) {
 }
 
 // ---------- 初始化 ----------
+
+// 可拖动列宽（配置表 9 列 / 统计表 11 列），宽度记忆在 localStorage
+const cfgResize = initTableResize('cfgTable', 'qostool.cfgWidths', [90, 115, 62, 115, 62, 62, 82, 82, 72]);
+const statsResize = initTableResize('statsTable', 'qostool.statsWidths', [105, 55, 195, 75, 68, 75, 68, 70, 70, 60, 72]);
+// 速率列在 colgroup 中的索引（配置表第 7/8/9 列）
+const RATE_COL_IDX = [6, 7, 8];
 
 $('btnStart').onclick = doStart;
 $('btnStop').onclick = doStop;
