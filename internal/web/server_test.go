@@ -101,7 +101,9 @@ func TestAPIConfigRoundTrip(t *testing.T) {
 	body := `{"flows":[{"name":"新流","protocol":"udp","src_ip":"10.0.0.1","dst_ip":"10.0.0.2",
 		"src_port":1111,"dst_port":2222,"dscp":"AF41","rate_mbps":5,"rate_pps":0,"ip_len":128}]}`
 	rec2 := httptest.NewRecorder()
-	s.handleConfig(rec2, httptest.NewRequest("POST", "/api/config", strings.NewReader(body)))
+	req2 := httptest.NewRequest("POST", "/api/config", strings.NewReader(body))
+	req2.Header.Set("Content-Type", "application/json")
+	s.handleConfig(rec2, req2)
 	if rec2.Code != http.StatusOK {
 		t.Fatalf("POST 配置 code = %d, body=%s", rec2.Code, rec2.Body.String())
 	}
@@ -120,7 +122,9 @@ func TestAPIConfigValidation(t *testing.T) {
 	}
 	for i, body := range cases {
 		rec := httptest.NewRecorder()
-		s.handleConfig(rec, httptest.NewRequest("POST", "/api/config", strings.NewReader(body)))
+		req := httptest.NewRequest("POST", "/api/config", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		s.handleConfig(rec, req)
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("case %d: code = %d, want 400 (body=%s)", i, rec.Code, body)
 		}
@@ -149,7 +153,9 @@ func TestControlDisabledInCLIMode(t *testing.T) {
 func TestStartBadIface(t *testing.T) {
 	s := newTestServer()
 	rec := httptest.NewRecorder()
-	s.handleStart(rec, httptest.NewRequest("POST", "/api/start", strings.NewReader(`{"iface":"不存在的接口名"}`)))
+	req := httptest.NewRequest("POST", "/api/start", strings.NewReader(`{"iface":"不存在的接口名"}`))
+	req.Header.Set("Content-Type", "application/json")
+	s.handleStart(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("start 坏接口 code = %d, want 400 (body=%s)", rec.Code, rec.Body.String())
 	}
