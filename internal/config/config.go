@@ -83,8 +83,18 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// Validate 校验全部流的字段。
+// Validate 校验全部流的字段（发送相关参数：速率必填、ip_len 必须合法）。
 func (c *Config) Validate() error {
+	return c.validate(true)
+}
+
+// ValidateRecv 校验接收端配置：不要求速率与包长（只监听不发送）。
+func (c *Config) ValidateRecv() error {
+	return c.validate(false)
+}
+
+// validate 校验全部流的字段；requireRates=false 时跳过速率与 ip_len 检查（接收端）。
+func (c *Config) validate(requireRates bool) error {
 	if len(c.Flows) == 0 {
 		return fmt.Errorf("flows 不能为空")
 	}
@@ -113,6 +123,9 @@ func (c *Config) Validate() error {
 		if f.SrcPort < 1 || f.SrcPort > 65535 || f.DstPort < 1 || f.DstPort > 65535 {
 			return fmt.Errorf("flow %d (%s): 端口必须在 1-65535", i+1, f.Name)
 		}
+		if !requireRates {
+			continue // 接收端：无需速率与包长
+		}
 		if f.RateMbps < 0 || f.RatePPS < 0 {
 			return fmt.Errorf("flow %d (%s): 速率不能为负", i+1, f.Name)
 		}
@@ -131,4 +144,20 @@ func (c *Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+// LoadRecv 读取接收端配置：与 Load 相同但跳过速率与包长校验。
+func LoadRecv(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("解析配置 %s: %w", path, err)
+	}
+	if err := cfg.ValidateRecv(); err != nil {
+		return nil, fmt.Errorf("配置校验失败: %w", err)
+	}
+	return &cfg, nil
 }

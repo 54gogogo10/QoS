@@ -80,7 +80,7 @@
     <thead>
       <tr>
         <th>流名</th><th>源 IP</th><th>源端口</th><th>目的 IP</th><th>目的端口</th>
-        <th>DSCP</th><th>带宽 Mbps</th><th>包速率 pps</th><th>IP包长度</th>
+        <th>DSCP</th><th id="thRateMbps">带宽 Mbps</th><th id="thRatePps">包速率 pps</th><th id="thIPLen">IP包长度</th>
       </tr>
     </thead>
     <tbody id="cfgBody"></tbody>
@@ -170,7 +170,14 @@ function loadConfig() {
     body.innerHTML = '';
     for (const f of cfg.flows) {
       const tr = document.createElement('tr');
-      const cell = (id, val) => `<td class="${id==='name'?'name':id==='src_ip'||id==='dst_ip'?'ip':id==='dscp'?'dscp':'num'}"><input data-id="${id}" value="${esc(f[id])}"></td>`;
+      const cell = (id, val) => {
+        let cls = 'num';
+        if (id === 'name') cls = 'name';
+        else if (id === 'src_ip' || id === 'dst_ip') cls = 'ip';
+        else if (id === 'dscp') cls = 'dscp';
+        else if (id === 'rate_mbps' || id === 'rate_pps' || id === 'ip_len') cls = 'rate ' + id;
+        return `<td class="${cls}"><input data-id="${id}" value="${esc(f[id])}"></td>`;
+      };
       tr.innerHTML =
         cell('name', f.name) + cell('src_ip', f.src_ip) + cell('src_port', f.src_port) +
         cell('dst_ip', f.dst_ip) + cell('dst_port', f.dst_port) + cell('dscp', f.dscp) +
@@ -222,17 +229,23 @@ const esc = v => String(v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(
 
 async function applyConfig() {
   const rows = document.querySelectorAll('#cfgBody tr');
+  const isRecv = currentMode === 'recv';
   const flows = [];
   for (const tr of rows) {
     const get = id => tr.querySelector(`input[data-id="${id}"]`).value.trim();
-    flows.push({
+    const flow = {
       name: get('name'), protocol: 'udp',
       src_ip: get('src_ip'), src_port: +get('src_port'),
       dst_ip: get('dst_ip'), dst_port: +get('dst_port'),
       dscp: get('dscp'),
-      rate_mbps: +get('rate_mbps') || 0, rate_pps: +get('rate_pps') || 0,
-      ip_len: +get('ip_len') || 0,
-    });
+    };
+    // 接收端只监听：不提交发送参数（带宽/包速率/包长）
+    if (!isRecv) {
+      flow.rate_mbps = +get('rate_mbps') || 0;
+      flow.rate_pps = +get('rate_pps') || 0;
+      flow.ip_len = +get('ip_len') || 0;
+    }
+    flows.push(flow);
   }
   try {
     const r = await fetch('/api/config', {
@@ -280,6 +293,12 @@ function refreshRoleUI() {
   // 表头：发送端角色 TX 为本端；接收端角色 TX 列显示远端发送端速率
   $('thTxMbps').textContent = isRecv ? '远端TX Mbps' : 'TX Mbps';
   $('thTxPps').textContent = isRecv ? '远端TX pps' : 'TX pps';
+  // 接收端精简配置：隐藏 带宽/包速率/IP包长度 列（只监听无需发送参数）
+  const hideRates = isRecv;
+  $('thRateMbps').style.display = hideRates ? 'none' : '';
+  $('thRatePps').style.display = hideRates ? 'none' : '';
+  $('thIPLen').style.display = hideRates ? 'none' : '';
+  document.querySelectorAll('#cfgBody td.rate').forEach(td => td.style.display = hideRates ? 'none' : '');
   updateStartButton();
 }
 

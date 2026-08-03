@@ -144,11 +144,6 @@ func runCLI(mode string, args []string) error {
 		return fmt.Errorf("interval 不能小于 10ms")
 	}
 
-	cfg, err := config.Load(*cfgPath)
-	if err != nil {
-		return err
-	}
-
 	var ctrlMode controller.Mode
 	switch mode {
 	case "send":
@@ -158,6 +153,19 @@ func runCLI(mode string, args []string) error {
 	default:
 		ctrlMode = controller.ModeBidir
 	}
+
+	// 接收端只监听：不要求速率/包长参数
+	var cfg *config.Config
+	var err error
+	if ctrlMode == controller.ModeRecv {
+		cfg, err = config.LoadRecv(*cfgPath)
+	} else {
+		cfg, err = config.Load(*cfgPath)
+	}
+	if err != nil {
+		return err
+	}
+
 	ctrl := controller.New(cfg, ctrlMode)
 	ctrl.SetLogDir(filepath.Dir(*cfgPath))
 	if err := ctrl.Start(*iface); err != nil {

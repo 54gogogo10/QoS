@@ -112,3 +112,25 @@ func TestConfigSaveRoundTrip(t *testing.T) {
 		t.Fatalf("DSCP 往返失败: %d", cfg2.Flows[0].DSCP)
 	}
 }
+
+// TestValidateRecvNoRates 接收端配置不要求速率与包长。
+func TestValidateRecvNoRates(t *testing.T) {
+	cfg := &Config{Flows: []Flow{
+		{Name: "a", Protocol: "udp", SrcIP: "1.1.1.1", DstIP: "2.2.2.2",
+			SrcPort: 100, DstPort: 200, DSCP: 46},
+	}}
+	if err := cfg.ValidateRecv(); err != nil {
+		t.Fatalf("接收端配置应通过: %v", err)
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("发送校验应要求速率")
+	}
+	// 接收端配置保存再加载（LoadRecv 往返）
+	p := filepath.Join(t.TempDir(), "recv.yaml")
+	if err := cfg.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadRecv(p); err != nil {
+		t.Fatalf("LoadRecv 失败: %v", err)
+	}
+}
