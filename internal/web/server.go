@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -32,9 +33,19 @@ type Server struct {
 	remoteData        *remoteSnapshot
 	remoteLoopRunning bool
 
-	peerMu    sync.Mutex
-	peerAddr  string // 接收端地址（IP:port），发送端启动时通知其开始监听
 	lastIface string // 最近一次监听接口（接收端被远端通知启动时使用）
+
+	receiversMu sync.Mutex
+	receivers   map[string]*receiverInfo // 已连接接收端（key=ip:port）
+	port        string                   // 本端 web 端口（接收端注册时上报）
+
+}
+
+// receiverInfo 是已连接到本发送端的接收端信息。
+type receiverInfo struct {
+	Addr     string    `json:"addr"` // ip:port
+	Online   bool      `json:"online"`
+	LastSeen time.Time `json:"last_seen"`
 }
 
 // remoteSnapshot 是拉取到的发送端 TX 统计快照。
@@ -51,7 +62,12 @@ type remoteSnapshot struct {
 
 // New 创建 Web 服务：send/recv/bidir 三个独立实例与独立配置文件。
 func New(ctrls map[controller.Mode]*controller.Controller, cfgPaths map[controller.Mode]string, remoteControl bool) *Server {
-	return &Server{ctrls: ctrls, cfgPaths: cfgPaths, remoteControl: remoteControl}
+	return &Server{
+		ctrls:         ctrls,
+		cfgPaths:      cfgPaths,
+		remoteControl: remoteControl,
+		receivers:     map[string]*receiverInfo{},
+	}
 }
 
 // ctrl 返回指定角色的控制器（CLI 单实例模式下返回唯一实例）。
@@ -88,11 +104,16 @@ func (s *Server) ListenAndServe(addr string) error {
 	mux.HandleFunc("/api/stop", s.handleStop)
 	mux.HandleFunc("/api/mode", s.handleMode)
 	mux.HandleFunc("/api/remote", s.handleRemote)
-	mux.HandleFunc("/api/peer", s.handlePeer)
+	mux.HandleFunc("/api/receivers", s.handleReceivers)
 	mux.HandleFunc("/api/iface", s.handleIfaceSel)
 	mux.HandleFunc("/api/tx_stats", s.handleTxStats)
 	mux.HandleFunc("/", s.handleIndex)
 	s.srv = &http.Server{Addr: addr, Handler: mux}
+	if _, p, err := net.SplitHostPort(addr); err == nil {
+		s.port = p
+	} else {
+		s.port = "16666"
+	}
 	return s.srv.ListenAndServe()
 }
 
@@ -388,8 +409,9 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var in struct {
-		Iface string `json:"iface"`
-		Mode  string `json:"mode"`
+		Iface     string   `json:"iface"`
+		Mode      string   `json:"mode"`
+		Receivers []string `json:"receivers"` // 勾选的接收端地址（发送端推送监听命令）
 	}
 	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
@@ -399,15 +421,15 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	ctrl := s.ctrl(m)
 	log.Printf("[web] handleStart mode=%s iface=%q lastIface=%q", in.Mode, in.Iface, s.lastIface)
 	if in.Iface != "" {
-		s.peerMu.Lock()
+		s.receiversMu.Lock()
 		s.lastIface = in.Iface // 记住监听接口（被远端通知启动时使用）
-		s.peerMu.Unlock()
+		s.receiversMu.Unlock()
 	}
 	if in.Iface == "" && m != controller.ModeSend {
 		// 接收端被发送端通知启动：用上次的监听接口
-		s.peerMu.Lock()
+		s.receiversMu.Lock()
 		last := s.lastIface
-		s.peerMu.Unlock()
+		s.receiversMu.Unlock()
 		if last != "" {
 			in.Iface = last
 		} else {
@@ -425,18 +447,25 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	notifyMsg := ""
+	notifyMsgs := []string{}
 	if m == controller.ModeSend {
-		notifyMsg = s.notifyPeerListen() // 通知接收端开始监听
-		time.Sleep(2 * time.Second)      // 等待接收端监听就绪，避免丢包
+		// 推送监听命令到勾选的接收端
+		for _, addr := range in.Receivers {
+			if msg := NotifyPeerListen(addr); msg != "" {
+				notifyMsgs = append(notifyMsgs, addr+": "+msg)
+			}
+		}
+		time.Sleep(2 * time.Second) // 等待接收端监听就绪，避免丢包
 	}
 	if err := ctrl.Start(in.Iface); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	msg := "已启动"
-	if notifyMsg != "" {
-		msg += "（未能通知接收端监听: " + notifyMsg + "）"
+	if len(notifyMsgs) > 0 {
+		msg += "（部分接收端未同步: " + strings.Join(notifyMsgs, "; ") + "）"
+	} else if len(in.Receivers) > 0 {
+		msg += "（已同步 " + fmt.Sprintf("%d", len(in.Receivers)) + " 个接收端监听）"
 	}
 	writeJSON(w, struct {
 		OK      bool   `json:"ok"`
@@ -493,49 +522,68 @@ func (s *Server) handleIfaceSel(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "缺少 iface 参数")
 		return
 	}
-	s.peerMu.Lock()
+	s.receiversMu.Lock()
 	s.lastIface = in.Iface
-	s.peerMu.Unlock()
+	s.receiversMu.Unlock()
 	writeJSON(w, struct {
 		OK    bool   `json:"ok"`
 		Iface string `json:"iface"`
 	}{OK: true, Iface: in.Iface})
 }
 
-// SetPeer 设置接收端地址（IP:port），供 CLI 模式通过 --peer 参数使用。
-func (s *Server) SetPeer(addr string) {
-	s.peerMu.Lock()
-	s.peerAddr = addr
-	s.peerMu.Unlock()
-}
-
-// handlePeer 设置接收端地址（发送端启动时通知其开始监听）。空地址清除。
-func (s *Server) handlePeer(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+// handleReceivers 返回已连接本发送端的接收端列表（含在线状态）。
+func (s *Server) handleReceivers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.requireControl(w, r) {
+	s.receiversMu.Lock()
+	out := make([]*receiverInfo, 0, len(s.receivers))
+	now := time.Now()
+	for _, ri := range s.receivers {
+		ri.Online = now.Sub(ri.LastSeen) < 5*time.Second // 5 秒内拉取过视为在线
+		out = append(out, ri)
+	}
+	s.receiversMu.Unlock()
+	writeJSON(w, out)
+}
+
+// recordReceiver 从接收端的拉取请求中登记其地址（接收端自动注册机制）。
+func (s *Server) recordReceiver(r *http.Request) {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
 		return
 	}
-	var in struct {
-		Addr string `json:"addr"`
+	port := r.URL.Query().Get("port")
+	if port == "" {
+		port = "16666"
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
-		writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
-		return
+	key := net.JoinHostPort(host, port)
+	s.receiversMu.Lock()
+	ri := s.receivers[key]
+	if ri == nil {
+		ri = &receiverInfo{Addr: key}
+		s.receivers[key] = ri
 	}
-	in.Addr = strings.TrimSpace(in.Addr)
-	if in.Addr != "" && !strings.Contains(in.Addr, ":") {
-		in.Addr += ":16666"
+	ri.Online = true
+	ri.LastSeen = time.Now()
+	s.receiversMu.Unlock()
+}
+
+// NotifyAllReceivers 推送监听命令到所有在线接收端（CLI 发送端启动时用）。
+func (s *Server) NotifyAllReceivers() {
+	s.receiversMu.Lock()
+	addrs := make([]string, 0, len(s.receivers))
+	now := time.Now()
+	for _, ri := range s.receivers {
+		if now.Sub(ri.LastSeen) < 5*time.Second {
+			addrs = append(addrs, ri.Addr)
+		}
 	}
-	s.peerMu.Lock()
-	s.peerAddr = in.Addr
-	s.peerMu.Unlock()
-	writeJSON(w, struct {
-		OK   bool   `json:"ok"`
-		Addr string `json:"addr"`
-	}{OK: true, Addr: in.Addr})
+	s.receiversMu.Unlock()
+	for _, addr := range addrs {
+		NotifyPeerListen(addr)
+	}
 }
 
 // NotifyPeerListen 通知接收端开始监听。
@@ -556,14 +604,6 @@ func NotifyPeerListen(addr string) string {
 		return "接收端拒绝: " + string(b)
 	}
 	return ""
-}
-
-// notifyPeerListen 通知本端配置的接收端开始监听；返回错误信息。
-func (s *Server) notifyPeerListen() string {
-	s.peerMu.Lock()
-	addr := s.peerAddr
-	s.peerMu.Unlock()
-	return NotifyPeerListen(addr)
 }
 
 // handleRemote 设置发送端地址（接收端拉取其 TX 统计并统一显示）。
@@ -612,7 +652,12 @@ func (s *Server) remoteLoopOnce() {
 
 	snap := &remoteSnapshot{Addr: addr}
 	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Get("http://" + addr + "/api/tx_stats")
+	// 带上本端端口：发送端据此登记接收端地址（自动注册）
+	u := "http://" + addr + "/api/tx_stats"
+	if s.port != "" {
+		u += "?port=" + s.port
+	}
+	resp, err := client.Get(u)
 	if err != nil {
 		// 拉取失败（发送端退出/网络断）：保留最后一次成功的数据，仅标记离线，
 		// 让接收端仍能显示发送端停止前的累计包数。
@@ -678,11 +723,13 @@ func (s *Server) startRemoteLoop() {
 
 // handleTxStats 供远端接收端拉取本端 TX 统计：
 // 优先选择发送端角色（send）有数据的实例（含停止后保留的累计值），其次双向（bidir）。
+// 每次拉取同时完成"接收端自动注册"（发送端感知谁在连接自己）。
 func (s *Server) handleTxStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	s.recordReceiver(r) // 接收端自动注册（从拉取请求中感知）
 	var ctrl *controller.Controller
 	for _, m := range []controller.Mode{controller.ModeSend, controller.ModeBidir} {
 		c := s.ctrl(m)

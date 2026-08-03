@@ -80,9 +80,7 @@
     <input id="remoteAddr" placeholder="192.168.1.10:16666" style="width:150px">
     <button id="btnRemote">连接</button>
     <span id="remoteStatus" class="hint" style="display:none"></span>
-    <label id="lblPeer">接收端地址</label>
-    <input id="peerAddr" placeholder="192.168.1.20:16666" style="width:150px; display:none">
-    <button id="btnPeer" style="display:none">保存</button>
+    <span id="recvList" class="hint" style="display:none"></span>
     <label id="lblLossMode" style="display:none">丢包率</label>
     <select id="lossMode" style="display:none">
       <option value="seq">seq空洞</option>
@@ -362,9 +360,7 @@ function refreshRoleUI() {
   $('lblRemote').style.display = isRecv ? '' : 'none';
   $('remoteAddr').style.display = isRecv ? '' : 'none';
   $('btnRemote').style.display = isRecv ? '' : 'none';
-  $('lblPeer').style.display = isSend ? '' : 'none';
-  $('peerAddr').style.display = isSend ? '' : 'none';
-  $('btnPeer').style.display = isSend ? '' : 'none';
+  $('recvList').style.display = isSend ? '' : 'none';
   $('lblLossMode').style.display = isRecv ? '' : 'none';
   $('lossMode').style.display = isRecv ? '' : 'none';
   $('btnStart').textContent = isSend ? '开始发送' : isRecv ? '开始监听' : '开始测试';
@@ -400,9 +396,12 @@ async function doStart() {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 8000);
   try {
+    const receivers = currentMode === 'send'
+      ? [...document.querySelectorAll('#recvList input[type="checkbox"]:checked')].map(cb => cb.dataset.addr)
+      : [];
     const r = await fetch('/api/start', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({iface, mode: currentMode}), signal: ac.signal,
+      body: JSON.stringify({iface, mode: currentMode, receivers}), signal: ac.signal,
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
@@ -438,19 +437,26 @@ function applyIfaceIP() {
   applyConfig(); // 提交配置
 }
 
-// setPeer 设置接收端地址（发送端启动时通知其开始监听）。
-async function setPeer() {
-  const addr = $('peerAddr').value.trim();
-  if (!addr) { showMsg('请输入接收端地址，如 192.168.1.20:16666', true); return; }
+// loadReceivers 加载已连接本发送端的接收端列表（复选框多选，发送时推送监听命令）。
+async function loadReceivers() {
   try {
-    const r = await fetch('/api/peer', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({addr}),
-    });
-    const d = await r.json().catch(() => ({}));
-    if (!r.ok) throw new Error(d.error || r.statusText);
-    showMsg('接收端地址已设置: ' + addr + '（点开始发送将自动通知接收端监听）', false);
-  } catch (e) { showMsg('设置接收端地址失败: ' + e.message, true); }
+    const r = await fetch('/api/receivers');
+    const devs = await r.json();
+    const el = $('recvList');
+    if (!devs || !devs.length) {
+      el.innerHTML = '<span style="color:#888">暂无接收端连接（接收端填入本机地址后自动出现）</span>';
+      return;
+    }
+    el.innerHTML = '<span style="color:#aaa">已连接接收端（勾选=发送时同步监听）:</span> ';
+    for (const d of devs) {
+      const on = d.online;
+      const cb = document.createElement('label');
+      cb.style.marginRight = '12px';
+      cb.style.color = on ? '#7dff7d' : '#ff5555';
+      cb.innerHTML = `<input type="checkbox" data-addr="${esc(d.addr)}" checked style="margin-right:3px">${esc(d.addr)}${on ? '' : '(离线)'}`;
+      el.appendChild(cb);
+    }
+  } catch (e) { /* 服务未就绪 */ }
 }
 
 // setRemote 设置发送端地址（接收端拉取其 TX 统计）。
@@ -697,6 +703,7 @@ async function tick() {
     updateRemoteStatus(d.remote);
     updateIfaceStat(d.iface_stat, d.running);
   } catch (e) { /* 服务未就绪 */ }
+  if (currentMode === 'send') loadReceivers();
   setTimeout(tick, 500);
 }
 
@@ -723,7 +730,6 @@ $('iface').onchange = () => { applyIface(); updateStartButton(); };
 $('role').onchange = e => setRole(e.target.value);
 $('btnRemote').onclick = setRemote;
 $('btnApplyIfaceIP').onclick = applyIfaceIP;
-$('btnPeer').onclick = setPeer;
 refreshRoleUI();
 
 // 图例（按实际配置的流名生成，最多 8）
