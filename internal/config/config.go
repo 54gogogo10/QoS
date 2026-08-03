@@ -17,9 +17,9 @@ type Flow struct {
 	SrcPort     int     `yaml:"src_port"`
 	DstPort     int     `yaml:"dst_port"`
 	DSCP        DSCP    `yaml:"dscp"`
-	RateMbps    float64 `yaml:"rate_mbps"`
-	RatePPS     float64 `yaml:"rate_pps"`
-	IPLen       int     `yaml:"ip_len"` // IP 包总长（IP 头+UDP 头+载荷）
+	RateMbps    float64 `yaml:"rate_mbps,omitempty"`
+	RatePPS     float64 `yaml:"rate_pps,omitempty"`
+	IPLen       int     `yaml:"ip_len,omitempty"` // IP 包总长（IP 头+UDP 头+载荷）
 }
 
 // Config 是一份完整配置，收发两端共用同一份。

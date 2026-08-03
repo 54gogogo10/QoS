@@ -257,9 +257,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	// 附加远端发送端 TX 统计（接收端角色统一显示）
+	// 附加远端发送端 TX 统计（接收端角色统一显示；离线时也返回 online=false 供状态指示）
 	s.remoteMu.Lock()
-	if s.remoteData != nil && s.remoteData.Online {
+	if s.remoteData != nil && s.remoteAddr != "" {
 		out.Remote = s.remoteData
 	}
 	s.remoteMu.Unlock()

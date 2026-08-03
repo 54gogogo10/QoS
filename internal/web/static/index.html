@@ -68,6 +68,7 @@
     <label id="lblRemote">发送端地址</label>
     <input id="remoteAddr" placeholder="192.168.1.10:16666" style="width:160px">
     <button id="btnRemote">连接</button>
+    <span id="remoteStatus" class="hint" style="display:none"></span>
     <button id="btnStart" class="primary">开始测试</button>
     <button id="btnStop" class="stop" disabled>停止</button>
     <span id="runHint" class="hint"></span>
@@ -185,7 +186,7 @@ function loadConfig() {
       linkRates(tr);
       body.appendChild(tr);
     }
-    // 最后一列是载荷字节，表头 9 列
+    applyRateColumnVisibility(); // 表格填充后按角色隐藏速率列
   }).catch(e => showMsg('加载配置失败: ' + e.message, true));
 }
 
@@ -286,13 +287,18 @@ function refreshRoleUI() {
   // 表头：发送端角色 TX 为本端；接收端角色 TX 列显示远端发送端速率
   $('thTxMbps').textContent = isRecv ? '远端TX Mbps' : 'TX Mbps';
   $('thTxPps').textContent = isRecv ? '远端TX pps' : 'TX pps';
-  // 接收端精简配置：隐藏 带宽/包速率/IP包长度 列（只监听无需发送参数）
-  const hideRates = isRecv;
+  applyRateColumnVisibility();
+  updateStartButton();
+}
+
+// applyRateColumnVisibility 接收端隐藏 带宽/包速率/IP包长度 列（只监听无需发送参数）。
+// 注意：配置表格是异步填充的，填充后必须再次调用本函数。
+function applyRateColumnVisibility() {
+  const hideRates = currentMode === 'recv';
   $('thRateMbps').style.display = hideRates ? 'none' : '';
   $('thRatePps').style.display = hideRates ? 'none' : '';
   $('thIPLen').style.display = hideRates ? 'none' : '';
   document.querySelectorAll('#cfgBody td.rate').forEach(td => td.style.display = hideRates ? 'none' : '');
-  updateStartButton();
 }
 
 async function doStart() {
@@ -492,6 +498,23 @@ function renderTable(flows, running, remote) {
 
 let lastStats = {flows: [], history: {t: [], tx: [], rx: []}};
 
+// updateRemoteStatus 显示接收端与发送端的连接状态。
+function updateRemoteStatus(remote) {
+  const el = $('remoteStatus');
+  if (currentMode !== 'recv') { el.style.display = 'none'; return; }
+  el.style.display = '';
+  if (!remote) {
+    el.textContent = '未连接';
+    el.style.color = '#888';
+  } else if (remote.online) {
+    el.textContent = '已连接 · 更新于 ' + new Date(remote.updated).toLocaleTimeString() + (remote.running ? ' · 发送端运行中' : ' · 发送端未运行');
+    el.style.color = '#7dff7d';
+  } else {
+    el.textContent = '连接失败 · 发送端离线';
+    el.style.color = '#ff5555';
+  }
+}
+
 async function tick() {
   try {
     const r = await fetch('/api/stats?mode=' + currentMode);
@@ -500,6 +523,7 @@ async function tick() {
     document.getElementById('clock').textContent = new Date(d.now).toLocaleTimeString();
     drawChart(d.history);
     renderTable(d.flows, d.running, d.remote);
+    updateRemoteStatus(d.remote);
   } catch (e) { /* 服务未就绪 */ }
   setTimeout(tick, 500);
 }
