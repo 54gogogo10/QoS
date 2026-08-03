@@ -75,6 +75,7 @@
     <label id="lblIface">监听接口</label>
     <select id="iface" style="min-width:300px"></select>
     <button id="btnRefreshIface">刷新</button>
+    <button id="btnApplyIfaceIP" class="primary" style="display:none">应用到发送IP</button>
     <label id="lblRemote">发送端地址</label>
     <input id="remoteAddr" placeholder="192.168.1.10:16666" style="width:160px">
     <button id="btnRemote">连接</button>
@@ -137,6 +138,7 @@ async function loadInterfaces(select) {
     const r = await fetch('/api/interfaces');
     if (!r.ok) throw new Error(await r.text());
     const devs = await r.json();
+    window._ifaces = devs; // 缓存（应用到发送IP 用）
     const sel = $('iface');
     const prev = lastIface || sel.value;
     sel.innerHTML = '';
@@ -337,9 +339,11 @@ function setRole(role) {
 function refreshRoleUI() {
   const isSend = currentMode === 'send';
   const isRecv = currentMode === 'recv';
-  $('lblIface').style.display = isSend ? 'none' : '';
-  $('iface').style.display = isSend ? 'none' : '';
-  $('btnRefreshIface').style.display = isSend ? 'none' : '';
+  // 发送端也需要选择接口：用于把接口 IP 应用到发送源地址
+  $('lblIface').style.display = '';
+  $('iface').style.display = '';
+  $('btnRefreshIface').style.display = '';
+  $('btnApplyIfaceIP').style.display = isSend ? '' : 'none';
   $('lblRemote').style.display = isRecv ? '' : 'none';
   $('remoteAddr').style.display = isRecv ? '' : 'none';
   $('btnRemote').style.display = isRecv ? '' : 'none';
@@ -394,6 +398,24 @@ async function doStart() {
     $('btnStart').textContent = isSend ? '开始发送' : '开始测试';
     loadStatus(); // 立即刷新状态（若已运行则按钮由 loadStatus 保持禁用）
   }
+}
+
+// applyIfaceIP 把所选接口的 IP 应用到 8 条流的发送源地址（src_ip）。
+function applyIfaceIP() {
+  const name = $('iface').value;
+  if (!name) { showMsg('请先选择接口', true); return; }
+  const dev = (window._ifaces || []).find(d => d.name === name);
+  if (!dev || !dev.addresses || !dev.addresses.length) {
+    showMsg('该接口没有可用 IP 地址', true);
+    return;
+  }
+  // IPv4 优先（排除链路本地 169.254）
+  const ip = dev.addresses.find(a => !a.includes(':') && !a.startsWith('169.254.')) || dev.addresses[0];
+  document.querySelectorAll('#cfgBody tr').forEach(tr => {
+    tr.querySelector('[data-id="src_ip"]').value = ip;
+  });
+  showMsg('已将接口 ' + name + ' 的 IP ' + ip + ' 应用到全部流源地址', false);
+  applyConfig(); // 提交配置
 }
 
 // setRemote 设置发送端地址（接收端拉取其 TX 统计）。
@@ -659,6 +681,7 @@ $('btnRefreshIface').onclick = () => loadInterfaces(false);
 $('iface').onchange = () => { applyIface(); updateStartButton(); };
 $('role').onchange = e => setRole(e.target.value);
 $('btnRemote').onclick = setRemote;
+$('btnApplyIfaceIP').onclick = applyIfaceIP;
 refreshRoleUI();
 
 // 图例（按实际配置的流名生成，最多 8）
