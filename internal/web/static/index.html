@@ -520,11 +520,15 @@ function drawChart(hist) {
 
 // ---------- 统计表格 ----------
 
+// fmt 把数值格式化为 K/M/G 缩写（全局，供表格与诊断行共用）。
+function fmt(v) {
+  return v >= 1e9 ? (v/1e9).toFixed(2)+'G' : v >= 1e6 ? (v/1e6).toFixed(2)+'M'
+       : v >= 1e3 ? (v/1e3).toFixed(2)+'K' : v;
+}
+
 function renderTable(flows, running, remote) {
   const tbody = $('statsBody');
   tbody.innerHTML = '';
-  const fmt = v => v >= 1e9 ? (v/1e9).toFixed(2)+'G' : v >= 1e6 ? (v/1e6).toFixed(2)+'M'
-             : v >= 1e3 ? (v/1e3).toFixed(2)+'K' : v;
   // 远端数据：只要有缓存就显示（发送端离线时保留最后拉到的累计值）
   const hasRemote = remote && remote.tx_packets && remote.tx_packets.length > 0;
   for (let i = 0; i < flows.length; i++) {
