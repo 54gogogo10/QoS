@@ -271,12 +271,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		out.Remote = s.remoteData
 	}
 	s.remoteMu.Unlock()
-	// 接口级抓包统计：诊断"网卡有流量但 RX 为 0"
-	if m != controller.ModeSend {
+	// 接口级抓包统计：诊断"网卡有流量但 RX 为 0"。
+	// 运行中无条件返回（即使 0 包也要显示，让用户看到"未抓到包"的诊断）。
+	if m != controller.ModeSend && status.Running {
 		st := ctrl.IfaceStats()
-		if st.TotalPkts > 0 {
-			out.IfaceStat = &ifaceStat{TotalPkts: st.TotalPkts, MatchedPkts: st.MatchedPkts, OtherPkts: st.OtherPkts}
-		}
+		out.IfaceStat = &ifaceStat{TotalPkts: st.TotalPkts, MatchedPkts: st.MatchedPkts, OtherPkts: st.OtherPkts}
 	}
 	writeJSON(w, out)
 }
