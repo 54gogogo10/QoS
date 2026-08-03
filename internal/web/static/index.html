@@ -112,8 +112,8 @@
   <table class="stats resizable" id="statsTable">
     <thead><tr>
       <th>流</th><th>DSCP</th><th>5元组</th>
-      <th id="thTxMbps">TX Mbps</th><th id="thTxPps">TX pps</th><th>RX Mbps</th><th>RX pps</th>
-      <th>TX 包</th><th>RX 包</th><th>丢失</th><th>丢包率</th>
+      <th id="thTxMbps">TX Mbps</th><th id="thTxPps">TX pps</th><th class="sc-rx">RX Mbps</th><th class="sc-rx">RX pps</th>
+      <th>TX 包</th><th class="sc-rxpk">RX 包</th><th class="sc-loss">丢失</th><th class="sc-loss">丢包率</th>
     </tr></thead>
     <tbody id="statsBody"></tbody>
   </table>
@@ -347,6 +347,7 @@ function refreshRoleUI() {
   $('thTxMbps').textContent = isRecv ? '远端TX Mbps' : 'TX Mbps';
   $('thTxPps').textContent = isRecv ? '远端TX pps' : 'TX pps';
   applyRateColumnVisibility();
+  applyStatsColumnVisibility();
   updateStartButton();
 }
 
@@ -523,7 +524,8 @@ function renderTable(flows, running, remote) {
   tbody.innerHTML = '';
   const fmt = v => v >= 1e9 ? (v/1e9).toFixed(2)+'G' : v >= 1e6 ? (v/1e6).toFixed(2)+'M'
              : v >= 1e3 ? (v/1e3).toFixed(2)+'K' : v;
-  const remoteOnline = remote && remote.online;
+  // 远端数据：只要有缓存就显示（发送端离线时保留最后拉到的累计值）
+  const hasRemote = remote && remote.tx_packets && remote.tx_packets.length > 0;
   for (let i = 0; i < flows.length; i++) {
     const f = flows[i];
     // 停止后：丢包 = seq 空洞 + 尾部差（发送已发出、接收未确认），如实反映收发不一致；
@@ -539,9 +541,9 @@ function renderTable(flows, running, remote) {
     // 接收端角色：TX 列显示远端发送端的速率（同步数据）；无远端时显示 -
     let txMbps, txPps, txPkts;
     if (currentMode === 'recv') {
-      txMbps = remoteOnline && remote.tx_bps && remote.tx_bps[i] != null ? (remote.tx_bps[i]*8/1e6).toFixed(2) : '-';
-      txPps = remoteOnline && remote.tx_pps && remote.tx_pps[i] != null ? remote.tx_pps[i].toFixed(0) : '-';
-      txPkts = remoteOnline && remote.tx_packets && remote.tx_packets[i] != null ? fmt(remote.tx_packets[i]) : '-';
+      txMbps = hasRemote && remote.tx_bps[i] != null ? (remote.tx_bps[i]*8/1e6).toFixed(2) : '-';
+      txPps = hasRemote && remote.tx_pps[i] != null ? remote.tx_pps[i].toFixed(0) : '-';
+      txPkts = hasRemote ? fmt(remote.tx_packets[i]) : '-';
     } else {
       txMbps = (f.tx_bps*8/1e6).toFixed(2);
       txPps = f.tx_pps.toFixed(0);
@@ -550,16 +552,35 @@ function renderTable(flows, running, remote) {
     tr.innerHTML =
       `<td>${esc(f.name)}</td><td>${f.dscp}</td><td>${f.src_ip}:${f.src_port}->${f.dst_ip}:${f.dst_port}</td>` +
       `<td>${txMbps}</td><td>${txPps}</td>` +
-      `<td>${(f.rx_bps*8/1e6).toFixed(2)}</td><td>${f.rx_pps.toFixed(0)}</td>` +
-      `<td>${txPkts}</td><td>${fmt(f.rx_packets)}</td>` +
-      `<td>${fmt(lost)}</td><td>${(lossRate*100).toFixed(2)}%</td>`;
+      `<td class="sc-rx">${(f.rx_bps*8/1e6).toFixed(2)}</td><td class="sc-rx">${f.rx_pps.toFixed(0)}</td>` +
+      `<td>${txPkts}</td><td class="sc-rxpk">${fmt(f.rx_packets)}</td>` +
+      `<td class="sc-loss">${fmt(lost)}</td><td class="sc-loss">${(lossRate*100).toFixed(2)}%</td>`;
     tbody.appendChild(tr);
   }
+  applyStatsColumnVisibility();
 }
 
 // ---------- 轮询 ----------
 
 let lastStats = {flows: [], history: {t: [], tx: [], rx: []}};
+
+// applyStatsColumnVisibility 按角色隐藏统计表无意义列：
+// 单发（send）本端不接收 → 隐藏 RX Mbps/RX pps/RX包/丢失/丢包率。
+// 单收（recv）/双向显示全部（recv 的 TX 列为远端同步）。
+function applyStatsColumnVisibility() {
+  const hideSend = currentMode === 'send';
+  const sel = (cls, hide) => {
+    document.querySelectorAll('#statsTable th.' + cls).forEach(el => el.style.display = hide ? 'none' : '');
+    document.querySelectorAll('#statsTable td.' + cls).forEach(el => el.style.display = hide ? 'none' : '');
+  };
+  sel('sc-rx', hideSend);
+  sel('sc-rxpk', hideSend);
+  sel('sc-loss', hideSend);
+  // colgroup 同步（统计表列索引：5=RX Mbps 6=RX pps 8=RX包 9=丢失 10=丢包率）
+  [5, 6, 8, 9, 10].forEach(i => {
+    if (statsResize.cols[i]) statsResize.cols[i].style.display = hideSend ? 'none' : '';
+  });
+}
 
 // updateRemoteStatus 显示接收端与发送端的连接状态。
 function updateRemoteStatus(remote) {

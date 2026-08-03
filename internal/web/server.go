@@ -475,8 +475,15 @@ func (s *Server) remoteLoopOnce() {
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get("http://" + addr + "/api/tx_stats")
 	if err != nil {
+		// 拉取失败（发送端退出/网络断）：保留最后一次成功的数据，仅标记离线，
+		// 让接收端仍能显示发送端停止前的累计包数。
 		s.remoteMu.Lock()
-		s.remoteData = snap // Online=false
+		if s.remoteData == nil {
+			s.remoteData = snap // 从未成功过
+		} else {
+			s.remoteData.Online = false
+			s.remoteData.Running = false
+		}
 		s.remoteMu.Unlock()
 		return
 	}
@@ -531,7 +538,7 @@ func (s *Server) startRemoteLoop() {
 }
 
 // handleTxStats 供远端接收端拉取本端 TX 统计：
-// 优先返回发送端角色（send）的运行数据，其次双向（bidir）；均未运行时返回空。
+// 优先选择发送端角色（send）有数据的实例（含停止后保留的累计值），其次双向（bidir）。
 func (s *Server) handleTxStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
@@ -540,7 +547,8 @@ func (s *Server) handleTxStats(w http.ResponseWriter, r *http.Request) {
 	var ctrl *controller.Controller
 	for _, m := range []controller.Mode{controller.ModeSend, controller.ModeBidir} {
 		c := s.ctrl(m)
-		if c.Status().Running {
+		// 有聚合器即有数据：运行中或停止后保留的累计统计
+		if c.Aggregator() != nil {
 			ctrl = c
 			break
 		}
@@ -555,7 +563,7 @@ func (s *Server) handleTxStats(w http.ResponseWriter, r *http.Request) {
 		TxBps:   []float64{}, TxPps: []float64{}, TxPkts: []uint64{}, TxBytes: []uint64{},
 	}
 	if ctrl != nil {
-		out.Running = true
+		out.Running = ctrl.Status().Running
 		agg := ctrl.Aggregator()
 		if agg != nil {
 			snap := agg.Current(time.Now())
