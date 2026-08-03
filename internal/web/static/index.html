@@ -56,9 +56,18 @@
 
 <div class="panel">
   <div class="row">
-    <label>监听接口</label>
-    <select id="iface" style="min-width:320px"></select>
+    <label>角色</label>
+    <select id="role" style="min-width:140px">
+      <option value="bidir">双向（收发）</option>
+      <option value="recv">接收端（只监听）</option>
+      <option value="send">发送端（只发送）</option>
+    </select>
+    <label id="lblIface">监听接口</label>
+    <select id="iface" style="min-width:300px"></select>
     <button id="btnRefreshIface">刷新</button>
+    <label id="lblRemote">发送端地址</label>
+    <input id="remoteAddr" placeholder="192.168.1.10:16666" style="width:160px">
+    <button id="btnRemote">连接</button>
     <button id="btnStart" class="primary">开始测试</button>
     <button id="btnStop" class="stop" disabled>停止</button>
     <span id="runHint" class="hint"></span>
@@ -92,7 +101,7 @@
   <table class="stats">
     <thead><tr>
       <th>流</th><th>DSCP</th><th>5元组</th>
-      <th>TX Mbps</th><th>TX pps</th><th>RX Mbps</th><th>RX pps</th>
+      <th id="thTxMbps">TX Mbps</th><th id="thTxPps">TX pps</th><th>RX Mbps</th><th>RX pps</th>
       <th>TX 包</th><th>RX 包</th><th>丢失</th><th>丢包率</th>
     </tr></thead>
     <tbody id="statsBody"></tbody>
@@ -240,12 +249,47 @@ async function applyConfig() {
 
 // ---------- 启停 ----------
 
+let currentMode = 'bidir';
+
+// setRole 切换角色（发送/接收/双向）并刷新界面。
+async function setRole(role) {
+  currentMode = role;
+  try {
+    const r = await fetch('/api/mode', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({mode: role}),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || 'HTTP ' + r.status);
+    showMsg('已切换为' + (role === 'send' ? '发送端（只发送）' : role === 'recv' ? '接收端（只监听）' : '双向（收发）'), false);
+  } catch (e) { showMsg('切换角色失败: ' + e.message, true); }
+  refreshRoleUI();
+}
+
+// refreshRoleUI 按角色显示/隐藏接口选择与发送端地址，并调整按钮文案。
+function refreshRoleUI() {
+  const isSend = currentMode === 'send';
+  const isRecv = currentMode === 'recv';
+  $('lblIface').style.display = isSend ? 'none' : '';
+  $('iface').style.display = isSend ? 'none' : '';
+  $('btnRefreshIface').style.display = isSend ? 'none' : '';
+  $('lblRemote').style.display = isRecv ? '' : 'none';
+  $('remoteAddr').style.display = isRecv ? '' : 'none';
+  $('btnRemote').style.display = isRecv ? '' : 'none';
+  $('btnStart').textContent = isSend ? '开始发送' : isRecv ? '开始监听' : '开始测试';
+  // 表头：发送端角色 TX 为本端；接收端角色 TX 列显示远端发送端速率
+  $('thTxMbps').textContent = isRecv ? '远端TX Mbps' : 'TX Mbps';
+  $('thTxPps').textContent = isRecv ? '远端TX pps' : 'TX pps';
+  updateStartButton();
+}
+
 async function doStart() {
+  const isSend = currentMode === 'send';
   const iface = $('iface').value;
-  if (!iface) { showMsg('请先选择监听接口（点"刷新"重新枚举）', true); return; }
+  if (!isSend && !iface) { showMsg('请先选择监听接口（点"刷新"重新枚举）', true); return; }
   applyIface();
   $('btnStart').disabled = true;
-  $('btnStart').textContent = '启动中...';
+  $('btnStart').textContent = isSend ? '发送中...' : '启动中...';
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 8000);
   try {
@@ -255,7 +299,7 @@ async function doStart() {
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    showMsg('测试已启动（接口 ' + iface + '）', false);
+    showMsg((isSend ? '发送' : '测试') + '已启动' + (isSend ? '' : '（接口 ' + iface + '）'), false);
   } catch (e) {
     const msg = e.name === 'AbortError'
       ? '启动超时：接口无响应，请换一个接口（推荐 NPF_Loopback 或真实网卡）重试'
@@ -264,9 +308,24 @@ async function doStart() {
     alert(msg);
   } finally {
     clearTimeout(timer);
-    $('btnStart').textContent = '开始测试';
+    $('btnStart').textContent = isSend ? '开始发送' : '开始测试';
     loadStatus(); // 立即刷新状态（若已运行则按钮由 loadStatus 保持禁用）
   }
+}
+
+// setRemote 设置发送端地址（接收端拉取其 TX 统计）。
+async function setRemote() {
+  const addr = $('remoteAddr').value.trim();
+  if (!addr) { showMsg('请输入发送端地址，如 192.168.1.10:16666', true); return; }
+  try {
+    const r = await fetch('/api/remote', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({addr}),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    showMsg('发送端地址已设置: ' + addr + '（每秒同步 TX 统计）', false);
+  } catch (e) { showMsg('设置发送端地址失败: ' + e.message, true); }
 }
 
 async function doStop() {
@@ -370,12 +429,14 @@ function drawChart(hist) {
 
 // ---------- 统计表格 ----------
 
-function renderTable(flows, running) {
+function renderTable(flows, running, remote) {
   const tbody = $('statsBody');
   tbody.innerHTML = '';
   const fmt = v => v >= 1e9 ? (v/1e9).toFixed(2)+'G' : v >= 1e6 ? (v/1e6).toFixed(2)+'M'
              : v >= 1e3 ? (v/1e3).toFixed(2)+'K' : v;
-  for (const f of flows) {
+  const remoteOnline = remote && remote.online;
+  for (let i = 0; i < flows.length; i++) {
+    const f = flows[i];
     // 停止后：丢包 = seq 空洞 + 尾部差（发送已发出、接收未确认），如实反映收发不一致；
     // 运行中保持 seq 口径（RX 天然滞后于 TX，属正常管道延迟）。
     let lost = f.lost;
@@ -386,11 +447,22 @@ function renderTable(flows, running) {
     }
     const tr = document.createElement('tr');
     if (lossRate > 0) tr.className = 'loss';
+    // 接收端角色：TX 列显示远端发送端的速率（同步数据）；无远端时显示 -
+    let txMbps, txPps, txPkts;
+    if (currentMode === 'recv') {
+      txMbps = remoteOnline && remote.tx_bps && remote.tx_bps[i] != null ? (remote.tx_bps[i]*8/1e6).toFixed(2) : '-';
+      txPps = remoteOnline && remote.tx_pps && remote.tx_pps[i] != null ? remote.tx_pps[i].toFixed(0) : '-';
+      txPkts = remoteOnline && remote.tx_packets && remote.tx_packets[i] != null ? fmt(remote.tx_packets[i]) : '-';
+    } else {
+      txMbps = (f.tx_bps*8/1e6).toFixed(2);
+      txPps = f.tx_pps.toFixed(0);
+      txPkts = fmt(f.tx_packets);
+    }
     tr.innerHTML =
       `<td>${esc(f.name)}</td><td>${f.dscp}</td><td>${f.src_ip}:${f.src_port}->${f.dst_ip}:${f.dst_port}</td>` +
-      `<td>${(f.tx_bps*8/1e6).toFixed(2)}</td><td>${f.tx_pps.toFixed(0)}</td>` +
+      `<td>${txMbps}</td><td>${txPps}</td>` +
       `<td>${(f.rx_bps*8/1e6).toFixed(2)}</td><td>${f.rx_pps.toFixed(0)}</td>` +
-      `<td>${fmt(f.tx_packets)}</td><td>${fmt(f.rx_packets)}</td>` +
+      `<td>${txPkts}</td><td>${fmt(f.rx_packets)}</td>` +
       `<td>${fmt(lost)}</td><td>${(lossRate*100).toFixed(2)}%</td>`;
     tbody.appendChild(tr);
   }
@@ -407,7 +479,7 @@ async function tick() {
     lastStats = d;
     document.getElementById('clock').textContent = new Date(d.now).toLocaleTimeString();
     drawChart(d.history);
-    renderTable(d.flows, d.running);
+    renderTable(d.flows, d.running, d.remote);
   } catch (e) { /* 服务未就绪 */ }
   setTimeout(tick, 500);
 }
@@ -426,6 +498,9 @@ $('btnStop').onclick = doStop;
 $('btnApply').onclick = applyConfig;
 $('btnRefreshIface').onclick = () => loadInterfaces(false);
 $('iface').onchange = () => { applyIface(); updateStartButton(); };
+$('role').onchange = e => setRole(e.target.value);
+$('btnRemote').onclick = setRemote;
+refreshRoleUI();
 
 // 图例（按实际配置的流名生成，最多 8）
 function buildLegend(flows) {

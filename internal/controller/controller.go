@@ -92,6 +92,18 @@ func (c *Controller) Mode() Mode {
 	return c.mode
 }
 
+// SetMode 切换运行模式（发送/接收/双向）。运行中时自动重启以生效。
+func (c *Controller) SetMode(m Mode) error {
+	c.mu.Lock()
+	c.mode = m
+	running := c.running
+	c.mu.Unlock()
+	if running {
+		return c.Restart()
+	}
+	return nil
+}
+
 // Start 在指定接口上启动一轮测试；已在运行时返回错误。
 func (c *Controller) Start(iface string) error {
 	c.mu.Lock()

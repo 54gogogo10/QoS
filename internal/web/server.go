@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"qostool/internal/config"
@@ -23,11 +24,39 @@ type Server struct {
 	cfgPath       string // 配置持久化路径；空串表示不保存
 	remoteControl bool   // true=页面可启停/改配置（app 模式）；false=只读监控（CLI 模式）
 	srv           *http.Server
+
+	remoteMu          sync.Mutex
+	remoteAddr        string // 发送端地址（IP:port），接收端拉取其 TX 统计
+	remoteData        *remoteSnapshot
+	remoteLoopRunning bool
+}
+
+// remoteSnapshot 是拉取到的发送端 TX 统计快照。
+type remoteSnapshot struct {
+	Online  bool      `json:"online"`
+	Addr    string    `json:"addr"`
+	Running bool      `json:"running"`
+	Updated time.Time `json:"updated"`
+	TxBps   []float64 `json:"tx_bps"`
+	TxPps   []float64 `json:"tx_pps"`
+	TxPkts  []uint64  `json:"tx_packets"`
+	TxBytes []uint64  `json:"tx_bytes"`
 }
 
 // New 创建 Web 服务。
 func New(ctrl *controller.Controller, cfgPath string, remoteControl bool) *Server {
 	return &Server{ctrl: ctrl, cfgPath: cfgPath, remoteControl: remoteControl}
+}
+
+// SetRemote 设置发送端地址（IP:port），供 CLI 模式通过 --remote 参数使用。
+func (s *Server) SetRemote(addr string) {
+	s.remoteMu.Lock()
+	s.remoteAddr = addr
+	s.remoteData = nil
+	s.remoteMu.Unlock()
+	if addr != "" {
+		s.startRemoteLoop()
+	}
 }
 
 // ListenAndServe 启动 HTTP 服务（addr 如 "127.0.0.1:16666"）。
@@ -39,6 +68,9 @@ func (s *Server) ListenAndServe(addr string) error {
 	mux.HandleFunc("/api/config", s.handleConfig)
 	mux.HandleFunc("/api/start", s.handleStart)
 	mux.HandleFunc("/api/stop", s.handleStop)
+	mux.HandleFunc("/api/mode", s.handleMode)
+	mux.HandleFunc("/api/remote", s.handleRemote)
+	mux.HandleFunc("/api/tx_stats", s.handleTxStats)
 	mux.HandleFunc("/", s.handleIndex)
 	s.srv = &http.Server{Addr: addr, Handler: mux}
 	return s.srv.ListenAndServe()
@@ -62,10 +94,11 @@ type apiIface struct {
 }
 
 type apiStats struct {
-	Now     int64      `json:"now"`
-	Running bool       `json:"running"`
-	Flows   []apiFlow  `json:"flows"`
-	History apiHistory `json:"history"`
+	Now     int64           `json:"now"`
+	Running bool            `json:"running"`
+	Flows   []apiFlow       `json:"flows"`
+	History apiHistory      `json:"history"`
+	Remote  *remoteSnapshot `json:"remote,omitempty"`
 }
 
 type apiFlow struct {
@@ -206,6 +239,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// 附加远端发送端 TX 统计（接收端角色统一显示）
+	s.remoteMu.Lock()
+	if s.remoteData != nil && s.remoteData.Online {
+		out.Remote = s.remoteData
+	}
+	s.remoteMu.Unlock()
 	writeJSON(w, out)
 }
 
@@ -332,6 +371,178 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		OK      bool   `json:"ok"`
 		Message string `json:"message"`
 	}{OK: true, Message: "测试已停止"})
+}
+
+// handleMode 切换角色：send（只发送）/ recv（只监听）/ bidir（双向）。
+func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireControl(w, r) {
+		return
+	}
+	var in struct {
+		Mode string `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+		return
+	}
+	var m controller.Mode
+	switch in.Mode {
+	case "send":
+		m = controller.ModeSend
+	case "recv":
+		m = controller.ModeRecv
+	case "bidir":
+		m = controller.ModeBidir
+	default:
+		writeJSONError(w, http.StatusBadRequest, "mode 必须是 send/recv/bidir")
+		return
+	}
+	if err := s.ctrl.SetMode(m); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, struct {
+		OK      bool   `json:"ok"`
+		Mode    string `json:"mode"`
+		Message string `json:"message"`
+	}{OK: true, Mode: in.Mode, Message: "角色已切换"})
+}
+
+// handleRemote 设置发送端地址（接收端拉取其 TX 统计并统一显示）。
+// 空地址清除。
+func (s *Server) handleRemote(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireControl(w, r) {
+		return
+	}
+	var in struct {
+		Addr string `json:"addr"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+		return
+	}
+	in.Addr = strings.TrimSpace(in.Addr)
+	if in.Addr != "" && !strings.Contains(in.Addr, ":") {
+		in.Addr += ":16666" // 默认端口
+	}
+	s.remoteMu.Lock()
+	s.remoteAddr = in.Addr
+	s.remoteData = nil
+	s.remoteMu.Unlock()
+	if in.Addr != "" {
+		s.startRemoteLoop()
+	}
+	writeJSON(w, struct {
+		OK   bool   `json:"ok"`
+		Addr string `json:"addr"`
+	}{OK: true, Addr: in.Addr})
+}
+
+// remoteLoopOnce 拉取一次发送端 TX 统计（供轮询 goroutine 调用）。
+func (s *Server) remoteLoopOnce() {
+	s.remoteMu.Lock()
+	addr := s.remoteAddr
+	if addr == "" {
+		s.remoteMu.Unlock()
+		return
+	}
+	s.remoteMu.Unlock()
+
+	snap := &remoteSnapshot{Addr: addr}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://" + addr + "/api/tx_stats")
+	if err != nil {
+		s.remoteMu.Lock()
+		s.remoteData = snap // Online=false
+		s.remoteMu.Unlock()
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		var out struct {
+			Running bool     `json:"running"`
+			TxBps   []float64 `json:"tx_bps"`
+			TxPps   []float64 `json:"tx_pps"`
+			TxPkts  []uint64  `json:"tx_packets"`
+			TxBytes []uint64  `json:"tx_bytes"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&out); err == nil {
+			snap.Online = true
+			snap.Running = out.Running
+			snap.TxBps = out.TxBps
+			snap.TxPps = out.TxPps
+			snap.TxPkts = out.TxPkts
+			snap.TxBytes = out.TxBytes
+			snap.Updated = time.Now()
+		}
+	}
+	s.remoteMu.Lock()
+	s.remoteData = snap
+	s.remoteMu.Unlock()
+}
+
+// startRemoteLoop 启动每秒轮询发送端统计的 goroutine（幂等）。
+func (s *Server) startRemoteLoop() {
+	s.remoteMu.Lock()
+	defer s.remoteMu.Unlock()
+	if s.remoteLoopRunning {
+		return
+	}
+	s.remoteLoopRunning = true
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			s.remoteMu.Lock()
+			addr := s.remoteAddr
+			s.remoteMu.Unlock()
+			if addr == "" {
+				s.remoteMu.Lock()
+				s.remoteLoopRunning = false
+				s.remoteMu.Unlock()
+				return
+			}
+			s.remoteLoopOnce()
+		}
+	}()
+}
+
+// handleTxStats 供远端接收端拉取本端 TX 统计（发送端角色）。
+func (s *Server) handleTxStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	agg := s.ctrl.Aggregator()
+	st := s.ctrl.Status()
+	out := struct {
+		Running bool      `json:"running"`
+		TxBps   []float64 `json:"tx_bps"`
+		TxPps   []float64 `json:"tx_pps"`
+		TxPkts  []uint64  `json:"tx_packets"`
+		TxBytes []uint64  `json:"tx_bytes"`
+	}{
+		Running: st.Running,
+		TxBps:   []float64{}, TxPps: []float64{}, TxPkts: []uint64{}, TxBytes: []uint64{},
+	}
+	if agg != nil {
+		snap := agg.Current(time.Now())
+		for i := range snap {
+			out.TxBps = append(out.TxBps, snap[i].TxBps)
+			out.TxPps = append(out.TxPps, snap[i].TxPps)
+			out.TxPkts = append(out.TxPkts, snap[i].TxPackets)
+			out.TxBytes = append(out.TxBytes, snap[i].TxBytes)
+		}
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -125,6 +126,7 @@ func runCLI(mode string, args []string) error {
 	cfgPath := fs.String("c", "", "配置文件路径 (yaml)")
 	iface := fs.String("i", "", "监听接口 (recv/bidir 必填)")
 	webPort := fs.String("web", "16666", "Web 端口 (填 off 关闭)")
+	remote := fs.String("remote", "", "发送端地址 IP:port（接收端拉取其 TX 统计统一显示）")
 	dur := fs.Int("d", 0, "运行秒数 (0=直到 Ctrl+C)")
 	interval := fs.Int("interval", 100, "统计采样间隔毫秒")
 	fs.Parse(args)
@@ -172,6 +174,12 @@ func runCLI(mode string, args []string) error {
 	var srv *web.Server
 	if *webPort != "off" {
 		srv = web.New(ctrl, "", false) // CLI 模式下页面只读
+		if *remote != "" {
+			if !strings.Contains(*remote, ":") {
+				*remote += ":16666"
+			}
+			srv.SetRemote(*remote)
+		}
 		go func() {
 			if err := srv.ListenAndServe(":" + *webPort); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				fmt.Fprintf(os.Stderr, "Web 服务错误 (端口被占可换 --web 端口): %v\n", err)
