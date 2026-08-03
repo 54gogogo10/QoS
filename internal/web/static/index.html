@@ -163,10 +163,41 @@ function loadConfig() {
         cell('name', f.name) + cell('src_ip', f.src_ip) + cell('src_port', f.src_port) +
         cell('dst_ip', f.dst_ip) + cell('dst_port', f.dst_port) + cell('dscp', f.dscp) +
         cell('rate_mbps', f.rate_mbps) + cell('rate_pps', f.rate_pps) + cell('ip_len', f.ip_len);
+      linkRates(tr);
       body.appendChild(tr);
     }
     // 最后一列是载荷字节，表头 9 列
   }).catch(e => showMsg('加载配置失败: ' + e.message, true));
+}
+
+// linkRates 联动带宽与包速率：改一个自动换算另一个（基于本行 ip_len）。
+// 换算公式：带宽(Mbps) = 包速率 × ip_len(字节) × 8 / 1e6
+function linkRates(row) {
+  const mbps = row.querySelector('input[data-id="rate_mbps"]');
+  const pps = row.querySelector('input[data-id="rate_pps"]');
+  const ipLen = row.querySelector('input[data-id="ip_len"]');
+  let syncing = false;
+  const recalc = (from) => {
+    if (syncing) return;
+    syncing = true;
+    const len = +ipLen.value || 0;
+    if (from === 'mbps') {
+      const m = +mbps.value || 0;
+      pps.value = (m > 0 && len > 0) ? Math.round(m * 1e6 / 8 / len) : '';
+    } else {
+      const p = +pps.value || 0;
+      mbps.value = (p > 0 && len > 0) ? (p * len * 8 / 1e6).toFixed(2) : '';
+    }
+    syncing = false;
+  };
+  mbps.addEventListener('input', () => recalc('mbps'));
+  pps.addEventListener('input', () => recalc('pps'));
+  // ip_len 变化：以当前有值的速率为主重新联动
+  ipLen.addEventListener('input', () => {
+    if (syncing) return;
+    if (+mbps.value > 0) recalc('mbps');
+    else if (+pps.value > 0) recalc('pps');
+  });
 }
 
 const esc = v => String(v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
