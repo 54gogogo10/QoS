@@ -80,6 +80,9 @@
     <button id="btnApply" class="primary">应用配置</button>
     <span class="hint">应用后若测试正在运行将自动重启；DSCP 可填 0-63 或名字（EF/AF41/CS7）</span>
   </div>
+  <div class="row" style="margin-top:4px">
+    <span class="hint">带宽与包速率自动联动换算（基于 IP 包长度）：改任一数值，另一项自动跟随</span>
+  </div>
 </div>
 
 <div class="panel">
@@ -190,6 +193,12 @@ function linkRates(row) {
     }
     syncing = false;
   };
+  // 打开时补全显示：配置只填了一个速率时，另一个显示换算值（保持两栏一致）
+  const len0 = +ipLen.value || 0;
+  if (len0 > 0) {
+    if (+mbps.value > 0 && +pps.value <= 0) recalc('mbps');
+    else if (+pps.value > 0 && +mbps.value <= 0) recalc('pps');
+  }
   mbps.addEventListener('input', () => recalc('mbps'));
   pps.addEventListener('input', () => recalc('pps'));
   // ip_len 变化：以当前有值的速率为主重新联动
