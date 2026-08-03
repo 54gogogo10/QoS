@@ -6,6 +6,7 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
@@ -29,6 +30,10 @@ type Server struct {
 	remoteAddr        string // 发送端地址（IP:port），接收端拉取其 TX 统计
 	remoteData        *remoteSnapshot
 	remoteLoopRunning bool
+
+	peerMu    sync.Mutex
+	peerAddr  string // 接收端地址（IP:port），发送端启动时通知其开始监听
+	lastIface string // 最近一次监听接口（接收端被远端通知启动时使用）
 }
 
 // remoteSnapshot 是拉取到的发送端 TX 统计快照。
@@ -82,6 +87,7 @@ func (s *Server) ListenAndServe(addr string) error {
 	mux.HandleFunc("/api/stop", s.handleStop)
 	mux.HandleFunc("/api/mode", s.handleMode)
 	mux.HandleFunc("/api/remote", s.handleRemote)
+	mux.HandleFunc("/api/peer", s.handlePeer)
 	mux.HandleFunc("/api/tx_stats", s.handleTxStats)
 	mux.HandleFunc("/", s.handleIndex)
 	s.srv = &http.Server{Addr: addr, Handler: mux}
@@ -389,9 +395,23 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	m := modeFromString(in.Mode)
 	ctrl := s.ctrl(m)
+	log.Printf("[web] handleStart mode=%s iface=%q lastIface=%q", in.Mode, in.Iface, s.lastIface)
+	if in.Iface != "" {
+		s.peerMu.Lock()
+		s.lastIface = in.Iface // 记住监听接口（被远端通知启动时使用）
+		s.peerMu.Unlock()
+	}
 	if in.Iface == "" && m != controller.ModeSend {
-		writeJSONError(w, http.StatusBadRequest, "缺少 iface 参数")
-		return
+		// 接收端被发送端通知启动：用上次的监听接口
+		s.peerMu.Lock()
+		last := s.lastIface
+		s.peerMu.Unlock()
+		if last != "" {
+			in.Iface = last
+		} else {
+			writeJSONError(w, http.StatusBadRequest, "缺少 iface 参数（接收端请先手动选择监听接口开始监听一次）")
+			return
+		}
 	}
 	// 诊断：回环配置 + 非回环接口 → 必然收不到流量，提前给出明确提示（发送角色不抓包，跳过）
 	if m != controller.ModeSend && !isLoopbackIface(in.Iface) {
@@ -402,6 +422,10 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+	if m == controller.ModeSend {
+		s.notifyPeerListen() // 通知接收端开始监听
+		time.Sleep(2 * time.Second) // 等待接收端监听就绪，避免丢包
 	}
 	if err := ctrl.Start(in.Iface); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -425,6 +449,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		Mode string `json:"mode"`
 	}
 	json.NewDecoder(r.Body).Decode(&in)
+	log.Printf("[web] handleStop mode=%s", in.Mode)
 	s.ctrl(modeFromString(in.Mode)).Stop()
 	writeJSON(w, struct {
 		OK      bool   `json:"ok"`
@@ -439,6 +464,65 @@ func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 		Message string   `json:"message"`
 		Modes   []string `json:"modes"`
 	}{OK: true, Message: "角色已独立运行，无需切换", Modes: []string{"send", "recv", "bidir"}})
+}
+
+// SetPeer 设置接收端地址（IP:port），供 CLI 模式通过 --peer 参数使用。
+func (s *Server) SetPeer(addr string) {
+	s.peerMu.Lock()
+	s.peerAddr = addr
+	s.peerMu.Unlock()
+}
+
+// handlePeer 设置接收端地址（发送端启动时通知其开始监听）。空地址清除。
+func (s *Server) handlePeer(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireControl(w, r) {
+		return
+	}
+	var in struct {
+		Addr string `json:"addr"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+		return
+	}
+	in.Addr = strings.TrimSpace(in.Addr)
+	if in.Addr != "" && !strings.Contains(in.Addr, ":") {
+		in.Addr += ":16666"
+	}
+	s.peerMu.Lock()
+	s.peerAddr = in.Addr
+	s.peerMu.Unlock()
+	writeJSON(w, struct {
+		OK   bool   `json:"ok"`
+		Addr string `json:"addr"`
+	}{OK: true, Addr: in.Addr})
+}
+
+// NotifyPeerListen 通知接收端开始监听（best effort，失败不阻塞发送）。
+// 供 app 页面（handleStart）与 CLI（--peer 参数）共用。
+func NotifyPeerListen(addr string) {
+	if addr == "" {
+		return
+	}
+	body := strings.NewReader(`{"mode":"recv"}`)
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Post("http://"+addr+"/api/start", "application/json", body)
+	if err != nil {
+		return
+	}
+	resp.Body.Close()
+}
+
+// notifyPeerListen 通知本端配置的接收端开始监听。
+func (s *Server) notifyPeerListen() {
+	s.peerMu.Lock()
+	addr := s.peerAddr
+	s.peerMu.Unlock()
+	NotifyPeerListen(addr)
 }
 
 // handleRemote 设置发送端地址（接收端拉取其 TX 统计并统一显示）。

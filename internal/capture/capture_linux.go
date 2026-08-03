@@ -44,6 +44,11 @@ type IfaceStats struct {
 	OtherPkts   uint64 `json:"other_pkts"`
 }
 
+// Iface 返回接口名（错误日志用）。
+func (c *Capturer) Iface() string {
+	return c.iface
+}
+
 // Stats 返回接口级抓包统计。
 func (c *Capturer) Stats() IfaceStats {
 	return IfaceStats{

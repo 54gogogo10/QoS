@@ -152,6 +152,7 @@ func runCLI(mode string, args []string) error {
 	iface := fs.String("i", "", "监听接口 (recv/bidir 必填)")
 	webPort := fs.String("web", "16666", "Web 端口 (填 off 关闭)")
 	remote := fs.String("remote", "", "发送端地址 IP:port（接收端拉取其 TX 统计统一显示）")
+	peer := fs.String("peer", "", "接收端地址 IP:port（发送端启动时通知其开始监听）")
 	dur := fs.Int("d", 0, "运行秒数 (0=直到 Ctrl+C)")
 	interval := fs.Int("interval", 100, "统计采样间隔毫秒")
 	fs.Parse(args)
@@ -193,6 +194,11 @@ func runCLI(mode string, args []string) error {
 
 	ctrl := controller.New(cfg, ctrlMode)
 	ctrl.SetLogDir(filepath.Dir(*cfgPath))
+	// 发送端：启动前通知接收端监听并等待其就绪（防止漏收起始包）
+	if ctrlMode == controller.ModeSend && *peer != "" {
+		web.NotifyPeerListen(*peer)
+		time.Sleep(2 * time.Second)
+	}
 	if err := ctrl.Start(*iface); err != nil {
 		return err
 	}
@@ -208,6 +214,12 @@ func runCLI(mode string, args []string) error {
 	if *webPort != "off" {
 		srv = web.New(map[controller.Mode]*controller.Controller{ctrlMode: ctrl},
 			map[controller.Mode]string{ctrlMode: *cfgPath}, false) // CLI 模式下页面只读
+		if *peer != "" {
+			if !strings.Contains(*peer, ":") {
+				*peer += ":16666"
+			}
+			srv.SetPeer(*peer)
+		}
 		if *remote != "" {
 			if !strings.Contains(*remote, ":") {
 				*remote += ":16666"

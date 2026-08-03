@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -33,6 +34,11 @@ type IfaceStats struct {
 	TotalPkts   uint64 `json:"total_pkts"`   // 接口上抓到的 IP 包总数
 	MatchedPkts uint64 `json:"matched_pkts"` // 匹配配置并计入 RX 的包数
 	OtherPkts   uint64 `json:"other_pkts"`   // 未匹配/非本工具流量
+}
+
+// Iface 返回接口名（错误日志用）。
+func (c *Capturer) Iface() string {
+	return c.iface
 }
 
 // Stats 返回接口级抓包统计。
@@ -93,6 +99,11 @@ func (c *Capturer) Run(ctx context.Context) error {
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
+			}
+			// Npcap 读超时（100ms 无流量）返回 "Timeout Expired"——这是正常情况，
+			// 不是致命错误：继续循环等待后续流量（否则空窗期抓包线程会退出）。
+			if strings.Contains(err.Error(), "Timeout") {
+				continue
 			}
 			return fmt.Errorf("接口 %s 抓包失败: %w", c.iface, err)
 		}

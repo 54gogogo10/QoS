@@ -77,9 +77,17 @@
     <button id="btnRefreshIface">刷新</button>
     <button id="btnApplyIfaceIP" class="primary" style="display:none">应用到发送IP</button>
     <label id="lblRemote">发送端地址</label>
-    <input id="remoteAddr" placeholder="192.168.1.10:16666" style="width:160px">
+    <input id="remoteAddr" placeholder="192.168.1.10:16666" style="width:150px">
     <button id="btnRemote">连接</button>
     <span id="remoteStatus" class="hint" style="display:none"></span>
+    <label id="lblPeer">接收端地址</label>
+    <input id="peerAddr" placeholder="192.168.1.20:16666" style="width:150px; display:none">
+    <button id="btnPeer" style="display:none">保存</button>
+    <label id="lblLossMode" style="display:none">丢包率</label>
+    <select id="lossMode" style="display:none">
+      <option value="seq">seq空洞</option>
+      <option value="remote">远端TX对比</option>
+    </select>
     <button id="btnStart" class="primary">开始测试</button>
     <button id="btnStop" class="stop" disabled>停止</button>
     <span id="runHint" class="hint"></span>
@@ -347,6 +355,11 @@ function refreshRoleUI() {
   $('lblRemote').style.display = isRecv ? '' : 'none';
   $('remoteAddr').style.display = isRecv ? '' : 'none';
   $('btnRemote').style.display = isRecv ? '' : 'none';
+  $('lblPeer').style.display = isSend ? '' : 'none';
+  $('peerAddr').style.display = isSend ? '' : 'none';
+  $('btnPeer').style.display = isSend ? '' : 'none';
+  $('lblLossMode').style.display = isRecv ? '' : 'none';
+  $('lossMode').style.display = isRecv ? '' : 'none';
   $('btnStart').textContent = isSend ? '开始发送' : isRecv ? '开始监听' : '开始测试';
   // 表头：发送端角色 TX 为本端；接收端角色 TX 列显示远端发送端速率
   $('thTxMbps').textContent = isRecv ? '远端TX Mbps' : 'TX Mbps';
@@ -416,6 +429,21 @@ function applyIfaceIP() {
   });
   showMsg('已将接口 ' + name + ' 的 IP ' + ip + ' 应用到全部流源地址', false);
   applyConfig(); // 提交配置
+}
+
+// setPeer 设置接收端地址（发送端启动时通知其开始监听）。
+async function setPeer() {
+  const addr = $('peerAddr').value.trim();
+  if (!addr) { showMsg('请输入接收端地址，如 192.168.1.20:16666', true); return; }
+  try {
+    const r = await fetch('/api/peer', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({addr}),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    showMsg('接收端地址已设置: ' + addr + '（点开始发送将自动通知接收端监听）', false);
+  } catch (e) { showMsg('设置接收端地址失败: ' + e.message, true); }
 }
 
 // setRemote 设置发送端地址（接收端拉取其 TX 统计）。
@@ -555,11 +583,17 @@ function renderTable(flows, running, remote) {
   const hasRemote = remote && remote.tx_packets && remote.tx_packets.length > 0;
   for (let i = 0; i < flows.length; i++) {
     const f = flows[i];
-    // 停止后：丢包 = seq 空洞 + 尾部差（发送已发出、接收未确认），如实反映收发不一致；
-    // 运行中保持 seq 口径（RX 天然滞后于 TX，属正常管道延迟）。
+    // 丢包率口径：
+    // seq 空洞（默认，运行中 RX 滞后属正常）；或远端TX对比（recv 角色有远端数据时）。
     let lost = f.lost;
     let lossRate = f.loss_rate;
-    if (!running) {
+    const lossMode = (document.getElementById('lossMode') || {}).value || 'seq';
+    if (currentMode === 'recv' && lossMode === 'remote' && hasRemote && remote.tx_packets[i] != null) {
+      // 远端TX对比：丢包 = 远端发送 - 本端接收
+      lost = Math.max(0, remote.tx_packets[i] - f.rx_packets);
+      lossRate = remote.tx_packets[i] > 0 ? lost / remote.tx_packets[i] : 0;
+    } else if (!running) {
+      // seq 口径 + 停止后尾部差（发送已发出、接收未确认），如实反映收发不一致
       lost += Math.max(0, f.tx_packets - f.rx_packets - f.lost);
       lossRate = f.tx_packets > 0 ? lost / f.tx_packets : 0;
     }
@@ -682,6 +716,7 @@ $('iface').onchange = () => { applyIface(); updateStartButton(); };
 $('role').onchange = e => setRole(e.target.value);
 $('btnRemote').onclick = setRemote;
 $('btnApplyIfaceIP').onclick = applyIfaceIP;
+$('btnPeer').onclick = setPeer;
 refreshRoleUI();
 
 // 图例（按实际配置的流名生成，最多 8）

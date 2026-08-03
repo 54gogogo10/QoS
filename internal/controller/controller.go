@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
@@ -301,7 +302,9 @@ func (c *Controller) startLocked(iface string) error {
 		c.wg.Add(1)
 		go func() {
 			defer c.wg.Done()
-			cap.Run(cCtx)
+			if err := cap.Run(cCtx); err != nil && cCtx.Err() == nil {
+				log.Printf("[capture] 接口 %s 抓包异常: %v", cap.Iface(), err)
+			}
 		}()
 	}
 	c.wg.Add(1)
