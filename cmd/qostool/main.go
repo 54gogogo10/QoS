@@ -196,7 +196,9 @@ func runCLI(mode string, args []string) error {
 	ctrl.SetLogDir(filepath.Dir(*cfgPath))
 	// 发送端：启动前通知接收端监听并等待其就绪（防止漏收起始包）
 	if ctrlMode == controller.ModeSend && *peer != "" {
-		web.NotifyPeerListen(*peer)
+		if errMsg := web.NotifyPeerListen(*peer); errMsg != "" {
+			fmt.Fprintln(os.Stderr, "警告: 未能通知接收端监听:", errMsg)
+		}
 		time.Sleep(2 * time.Second)
 	}
 	if err := ctrl.Start(*iface); err != nil {

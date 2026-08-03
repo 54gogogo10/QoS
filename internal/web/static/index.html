@@ -181,6 +181,13 @@ function updateStartButton() {
 function applyIface() {
   lastIface = $('iface').value;
   localStorage.setItem('qostool.iface', lastIface);
+  // 记录接口选择（发送端通知自动监听时使用，无需先手动开始监听）
+  if (lastIface) {
+    fetch('/api/iface', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({iface: lastIface}),
+    }).catch(() => {});
+  }
 }
 
 // ---------- 配置表单 ----------
@@ -399,7 +406,7 @@ async function doStart() {
     });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    showMsg((isSend ? '发送' : '测试') + '已启动' + (isSend ? '' : '（接口 ' + iface + '）'), false);
+    showMsg(d.message || ((isSend ? '发送' : '测试') + '已启动' + (isSend ? '' : '（接口 ' + iface + '）')), false);
   } catch (e) {
     const msg = e.name === 'AbortError'
       ? '启动超时：接口无响应，请换一个接口（推荐 NPF_Loopback 或真实网卡）重试'
