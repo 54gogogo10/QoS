@@ -4,6 +4,15 @@
 接收端按 DSCP + 5 元组精确匹配，实时统计每条流的收发速率与丢包率。
 提供终端实时表格与 Web 曲线页面（默认端口 16666）。
 
+## 一键构建
+
+```bash
+bash build.sh v2.6.0   # 一次产出全部平台：Win10/11 app+CLI、Linux amd64/arm64、Win7
+```
+
+- 自动处理 Win7 所需的 Go 1.20 工具链（C:\go1.20\go）与依赖降级（gopacket v1.2.0 + x/sys v0.13.0），构建后自动恢复 go.mod
+- 产物打包到 `dist/<版本>/` 与 `dist/<版本>-win64.zip`
+
 ## Windows 7 版本
 
 `qostool-win7.exe`（x86_64）使用 Go 1.20 工具链编译，兼容 Windows 7 SP1。
