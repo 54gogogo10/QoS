@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"sync"
 	"syscall"
@@ -34,6 +35,15 @@ type Sender struct {
 // New 创建发送器；每条流一个 UDP socket。
 // 任一 flow 创建失败时，已创建的 socket 全部关闭（避免端口泄漏）。
 func New(cfg *config.Config, agg *stats.Aggregator) (*Sender, error) {
+	// Windows 非管理员运行且配置含非零 DSCP：标记可能无法生效，提前警告
+	if !isElevated() {
+		for _, f := range cfg.Flows {
+			if f.DSCP > 0 {
+				log.Printf("警告: 当前非管理员运行，DSCP 标记可能无法生效（Windows 权限限制，Win7 尤甚）。建议右键以管理员身份运行，或用 netsh qos 配置 DSCP 策略")
+				break
+			}
+		}
+	}
 	s := &Sender{agg: agg}
 	for i, f := range cfg.Flows {
 		fw, err := newFlow(i, f, agg)
