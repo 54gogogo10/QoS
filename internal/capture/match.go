@@ -26,6 +26,24 @@ func newMatcher(cfg *config.Config) *matcher {
 	return m
 }
 
+// matchIgnoreDSCP 返回 5 元组命中的流下标（忽略 DSCP），-1 表示未命中。
+// 用于诊断：发送端 DSCP 未生效时（实际 DSCP=0），仍能识别出"本应匹配的流"。
+func (m *matcher) matchIgnoreDSCP(k Key) int {
+	for i := range m.keys {
+		if m.keys[i].Proto == k.Proto &&
+			m.keys[i].SrcIP.Equal(k.SrcIP) && m.keys[i].DstIP.Equal(k.DstIP) &&
+			m.keys[i].SrcPort == k.SrcPort && m.keys[i].DstPort == k.DstPort {
+			return i
+		}
+		if m.keys[i].Proto == k.Proto &&
+			m.keys[i].SrcIP.Equal(k.DstIP) && m.keys[i].DstIP.Equal(k.SrcIP) &&
+			m.keys[i].SrcPort == k.DstPort && m.keys[i].DstPort == k.SrcPort {
+			return i
+		}
+	}
+	return -1
+}
+
 // match 返回命中的流下标，-1 表示未命中。
 // 方向无关：配置的源/目的互换也命中（双向测试时接收方向是反的）。
 func (m *matcher) match(k Key) int {

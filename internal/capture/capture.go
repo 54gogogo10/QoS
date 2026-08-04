@@ -24,16 +24,18 @@ type Capturer struct {
 	agg     *stats.Aggregator
 	iface   string
 
-	totalPkts   atomic.Uint64 // 接口上抓到的 IP 包总数（含所有协议）
-	matchedPkts atomic.Uint64 // 匹配配置且校验通过的包数
-	otherPkts   atomic.Uint64 // 抓到但未匹配/无 magic 的包数
+	totalPkts         atomic.Uint64 // 接口上抓到的 IP 包总数（含所有协议）
+	matchedPkts       atomic.Uint64 // 匹配配置且校验通过的包数
+	otherPkts         atomic.Uint64 // 抓到但未匹配/无 magic 的包数
+	dscpMismatchPkts  atomic.Uint64 // 5元组匹配但 DSCP 不匹配的包数（发送端 DSCP 可能未生效）
 }
 
 // IfaceStats 是接口级抓包统计（诊断"网卡有流量但 RX 为 0"用）。
 type IfaceStats struct {
-	TotalPkts   uint64 `json:"total_pkts"`   // 接口上抓到的 IP 包总数
-	MatchedPkts uint64 `json:"matched_pkts"` // 匹配配置并计入 RX 的包数
-	OtherPkts   uint64 `json:"other_pkts"`   // 未匹配/非本工具流量
+	TotalPkts        uint64 `json:"total_pkts"`          // 接口上抓到的 IP 包总数
+	MatchedPkts      uint64 `json:"matched_pkts"`        // 匹配配置并计入 RX 的包数
+	OtherPkts        uint64 `json:"other_pkts"`          // 未匹配/非本工具流量
+	DscpMismatchPkts uint64 `json:"dscp_mismatch_pkts"`  // 5元组匹配但 DSCP 不匹配（发送端 DSCP 可能未生效）
 }
 
 // Iface 返回接口名（错误日志用）。
@@ -44,9 +46,10 @@ func (c *Capturer) Iface() string {
 // Stats 返回接口级抓包统计。
 func (c *Capturer) Stats() IfaceStats {
 	return IfaceStats{
-		TotalPkts:   c.totalPkts.Load(),
-		MatchedPkts: c.matchedPkts.Load(),
-		OtherPkts:   c.otherPkts.Load(),
+		TotalPkts:        c.totalPkts.Load(),
+		MatchedPkts:      c.matchedPkts.Load(),
+		OtherPkts:        c.otherPkts.Load(),
+		DscpMismatchPkts: c.dscpMismatchPkts.Load(),
 	}
 }
 
@@ -121,7 +124,12 @@ func (c *Capturer) Run(ctx context.Context) error {
 		c.totalPkts.Add(1)
 		idx := c.matcher.match(pkt.key)
 		if idx < 0 {
-			c.otherPkts.Add(1)
+			// 5元组匹配但 DSCP 不匹配？→ 发送端 DSCP 可能未生效（如 Win7 上 IP_TOS 不工作）
+			if c.matcher.matchIgnoreDSCP(pkt.key) >= 0 {
+				c.dscpMismatchPkts.Add(1)
+			} else {
+				c.otherPkts.Add(1)
+			}
 			continue
 		}
 		fid, seq, ok := protocol.DecodeHeader(pkt.payload)

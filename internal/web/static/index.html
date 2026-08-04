@@ -662,8 +662,12 @@ function updateIfaceStat(st, running) {
   if (currentMode === 'send' || !st) { el.style.display = 'none'; return; }
   el.style.display = '';
   const total = st.total_pkts, matched = st.matched_pkts, other = st.other_pkts;
+  const dscpMis = st.dscp_mismatch_pkts || 0;
   let tip = '接口流量: 总计 ' + fmt(total) + ' 包 | 匹配 ' + fmt(matched) + ' | 其他 ' + fmt(other);
-  if (total > 0 && matched === 0) {
+  if (dscpMis > 0) {
+    tip += ' | ⚠' + fmt(dscpMis) + ' 包 5元组匹配但 DSCP 不匹配——发送端 DSCP 可能未生效（如 Win7 上 IP_TOS 不工作，实际 DSCP 全为 0）';
+    el.style.color = '#ffb020';
+  } else if (total > 0 && matched === 0) {
     tip += ' ← 流量与配置不匹配：请核对 5 元组（IP/端口）和 DSCP，或确认对端是 qostool 发送';
     el.style.color = '#ffb020';
   } else if (total === 0 && running) {

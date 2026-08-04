@@ -152,9 +152,10 @@ type apiStats struct {
 
 // ifaceStat 是接口级抓包统计的 API 结构。
 type ifaceStat struct {
-	TotalPkts   uint64 `json:"total_pkts"`
-	MatchedPkts uint64 `json:"matched_pkts"`
-	OtherPkts   uint64 `json:"other_pkts"`
+	TotalPkts        uint64 `json:"total_pkts"`
+	MatchedPkts      uint64 `json:"matched_pkts"`
+	OtherPkts        uint64 `json:"other_pkts"`
+	DscpMismatchPkts uint64 `json:"dscp_mismatch_pkts"`
 }
 
 type apiFlow struct {
@@ -311,7 +312,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	// 运行中无条件返回（即使 0 包也要显示，让用户看到"未抓到包"的诊断）。
 	if m != controller.ModeSend && status.Running {
 		st := ctrl.IfaceStats()
-		out.IfaceStat = &ifaceStat{TotalPkts: st.TotalPkts, MatchedPkts: st.MatchedPkts, OtherPkts: st.OtherPkts}
+		out.IfaceStat = &ifaceStat{TotalPkts: st.TotalPkts, MatchedPkts: st.MatchedPkts, OtherPkts: st.OtherPkts, DscpMismatchPkts: st.DscpMismatchPkts}
 	}
 	writeJSON(w, out)
 }
