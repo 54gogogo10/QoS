@@ -578,13 +578,16 @@ func (s *Server) recordReceiver(r *http.Request) {
 }
 
 // RemoteTXProvider 返回当前同步到的远端发送端 TX 数据（recv 模式日志/汇总用）。
+// 返回各切片的拷贝：调用方持有期间远端轮询会替换快照，不能共享内部切片。
 func (s *Server) RemoteTXProvider() (pps []float64, pkts, bytes []uint64, ok bool) {
 	s.remoteMu.Lock()
 	defer s.remoteMu.Unlock()
 	if s.remoteData == nil || !s.remoteData.Online {
 		return nil, nil, nil, false
 	}
-	return s.remoteData.TxPps, s.remoteData.TxPkts, s.remoteData.TxBytes, true
+	return append([]float64(nil), s.remoteData.TxPps...),
+		append([]uint64(nil), s.remoteData.TxPkts...),
+		append([]uint64(nil), s.remoteData.TxBytes...), true
 }
 
 // NotifyAllReceivers 推送监听命令到所有在线接收端（CLI 发送端启动时用）。

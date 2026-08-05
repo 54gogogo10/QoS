@@ -127,9 +127,9 @@ func (c *Capturer) Run(ctx context.Context) error {
 				continue
 			}
 			c.totalPkts.Add(1)
-			idx := c.matcher.match(pkt.key)
+			idx, dscpOnly := c.matcher.matchWithDiag(pkt.key)
 			if idx < 0 {
-				if c.matcher.matchIgnoreDSCP(pkt.key) >= 0 {
+				if dscpOnly >= 0 {
 					c.dscpMismatchPkts.Add(1)
 				} else {
 					c.otherPkts.Add(1)

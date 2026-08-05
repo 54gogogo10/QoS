@@ -56,7 +56,9 @@ func tailDiff(s stats.FlowSnapshot) uint64 {
 
 // Summary 渲染运行结束后的汇总报告。
 // 丢包列 = seq 空洞丢包 + 尾部差（收发不一致如实呈现）。
-func Summary(cfg *config.Config, snap []stats.FlowSnapshot, txTotal, rxTotal, lost uint64) string {
+// withTailDiff=false 时不计尾部差：recv 模式的 TX 来自远端轮询快照（滞后最多 1s），
+// “停止瞬间未确认的尾部包”语义不成立，计入会得到虚假的滞后差。
+func Summary(cfg *config.Config, snap []stats.FlowSnapshot, txTotal, rxTotal, lost uint64, withTailDiff bool) string {
 	var b strings.Builder
 	b.WriteString("========== 汇总报告 ==========\n")
 	b.WriteString(fmt.Sprintf("%-14s %-8s %14s %14s %14s %14s %10s\n",
@@ -64,7 +66,10 @@ func Summary(cfg *config.Config, snap []stats.FlowSnapshot, txTotal, rxTotal, lo
 	var totalLost uint64
 	for i, f := range cfg.Flows {
 		s := snap[i]
-		l := s.Lost + tailDiff(s)
+		l := s.Lost
+		if withTailDiff {
+			l += tailDiff(s)
+		}
 		totalLost += l
 		b.WriteString(fmt.Sprintf("%-14s %-8s %14d %14d %14d %14d %10d\n",
 			f.Name, dscpStr(f.DSCP), s.TxPackets, s.TxBytes, s.RxPackets, s.RxBytes, l))

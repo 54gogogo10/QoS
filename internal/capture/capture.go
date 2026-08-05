@@ -122,10 +122,10 @@ func (c *Capturer) Run(ctx context.Context) error {
 			continue
 		}
 		c.totalPkts.Add(1)
-		idx := c.matcher.match(pkt.key)
+		idx, dscpOnly := c.matcher.matchWithDiag(pkt.key)
 		if idx < 0 {
 			// 5元组匹配但 DSCP 不匹配？→ 发送端 DSCP 可能未生效（如 Win7 上 IP_TOS 不工作）
-			if c.matcher.matchIgnoreDSCP(pkt.key) >= 0 {
+			if dscpOnly >= 0 {
 				c.dscpMismatchPkts.Add(1)
 			} else {
 				c.otherPkts.Add(1)

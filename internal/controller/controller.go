@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"qostool/internal/capture"
@@ -54,8 +55,8 @@ type Controller struct {
 
 	senderCancel  context.CancelFunc // 发送 goroutine 的取消（先停）
 	captureCancel context.CancelFunc // 接收 goroutine 的取消（后停）
-	cap           *capture.Capturer  // 当前抓包器（IfaceStats 诊断用）
-	remoteTX      RemoteTXFunc       // 远端发送端 TX 数据提供者（recv 模式日志用）
+	cap           *capture.Capturer            // 当前抓包器（IfaceStats 诊断用）
+	remoteTX      atomic.Pointer[RemoteTXFunc] // 远端发送端 TX 数据提供者（recv 模式日志用）
 	iface         string
 	running       bool
 	started       time.Time
@@ -77,10 +78,9 @@ type RemoteTXFunc func() (pps []float64, pkts, bytes []uint64, ok bool)
 
 // SetRemoteTXProvider 设置远端发送端 TX 数据提供者：
 // recv 模式写日志/汇总时，TX 列用远端发送端的数据（而非本端 0）。
+// 经 atomic 指针读写，可在运行期间安全调用。
 func (c *Controller) SetRemoteTXProvider(fn RemoteTXFunc) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.remoteTX = fn
+	c.remoteTX.Store(&fn)
 }
 
 // SetLogDir 启用统计日志：每次运行在 <dir>/logs/ 下生成
@@ -396,13 +396,15 @@ func (c *Controller) writeLogRow(now time.Time, agg *stats.Aggregator) {
 }
 
 // applyRemoteTX 用远端发送端数据覆盖快照的 TX 字段（recv 模式本端 TX 恒为 0）。
-func (c *Controller) applyRemoteTX(snap []stats.FlowSnapshot) {
-	if c.remoteTX == nil {
-		return
+// 返回 true 表示远端数据已应用。
+func (c *Controller) applyRemoteTX(snap []stats.FlowSnapshot) bool {
+	fn := c.remoteTX.Load()
+	if fn == nil {
+		return false
 	}
-	pps, pkts, bytes, ok := c.remoteTX()
+	pps, pkts, bytes, ok := (*fn)()
 	if !ok {
-		return
+		return false
 	}
 	for i := range snap {
 		if i < len(pps) {
@@ -415,6 +417,7 @@ func (c *Controller) applyRemoteTX(snap []stats.FlowSnapshot) {
 			snap[i].TxBytes = bytes[i]
 		}
 	}
+	return true
 }
 
 // closeLogLocked 关闭 CSV 并写出汇总 txt（调用方持有锁）。
@@ -434,27 +437,15 @@ func (c *Controller) closeLogLocked(agg *stats.Aggregator, started time.Time, if
 		return
 	}
 	snap := agg.Current(stopped)
-	c.applyRemoteTX(snap)
+	applied := c.applyRemoteTX(snap)
 	txTotal, rxTotal, lost := agg.Totals()
-	// 远端 TX 覆盖后重新计算总发送
-	if c.remoteTX != nil {
-		if _, pkts, bytes, ok := c.remoteTX(); ok {
-			var t uint64
-			for i := range pkts {
-				if i < len(bytes) {
-					t += bytes[i]
-				} else {
-					t += pkts[i] * uint64(92) // 未知包长时按 92 估算
-				}
-			}
-			_ = t
-			// 用各流 TxBytes 求和更准确
-			t = 0
-			for i := range snap {
-				t += snap[i].TxBytes
-			}
-			txTotal = t
+	// 远端 TX 覆盖后重新计算总发送（用各流已覆盖的 TxBytes 求和）
+	if applied {
+		var t uint64
+		for i := range snap {
+			t += snap[i].TxBytes
 		}
+		txTotal = t
 	}
 	dur := stopped.Sub(started).Round(time.Second)
 	var b []byte
@@ -464,6 +455,7 @@ func (c *Controller) closeLogLocked(agg *stats.Aggregator, started time.Time, if
 	b = append(b, fmt.Sprintf("时长: %s\n", dur)...)
 	b = append(b, fmt.Sprintf("接口: %s\n", iface)...)
 	b = append(b, fmt.Sprintf("\n")...)
-	b = append(b, report.Summary(c.cfg, snap, txTotal, rxTotal, lost)...)
+	// recv 模式 TX 来自远端轮询快照（滞后最多 1s），尾部差口径不成立，不参与丢包统计
+	b = append(b, report.Summary(c.cfg, snap, txTotal, rxTotal, lost, c.remoteTX.Load() == nil)...)
 	os.WriteFile(sumPath, b, 0o644)
 }

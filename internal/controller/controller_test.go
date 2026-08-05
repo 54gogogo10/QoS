@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"qostool/internal/config"
+	"qostool/internal/stats"
 )
 
 func testCfg() *config.Config {
@@ -23,6 +24,39 @@ func cfgWithPort(port int) *config.Config {
 		{Name: "a", Protocol: "udp", SrcIP: "127.0.0.1", DstIP: "127.0.0.1",
 			SrcPort: port, DstPort: port + 1, DSCP: 46, RatePPS: 100, IPLen: 92},
 	}}
+}
+
+func TestApplyRemoteTX(t *testing.T) {
+	c := New(testCfg(), ModeRecv)
+	snap := []stats.FlowSnapshot{{FlowIdx: 0}, {FlowIdx: 1}}
+	if c.applyRemoteTX(snap) {
+		t.Fatal("未设置 provider 时不应应用")
+	}
+	pps := []float64{10, 20}
+	pkts := []uint64{100, 200}
+	bytes := []uint64{5000, 6000}
+	c.SetRemoteTXProvider(func() ([]float64, []uint64, []uint64, bool) {
+		return pps, pkts, bytes, true
+	})
+	if !c.applyRemoteTX(snap) {
+		t.Fatal("设置 provider 后应应用")
+	}
+	if snap[0].TxPps != 10 || snap[1].TxPps != 20 {
+		t.Fatalf("TxPps 未覆盖: %+v", snap)
+	}
+	if snap[0].TxPackets != 100 || snap[1].TxPackets != 200 {
+		t.Fatalf("TxPackets 未覆盖: %+v", snap)
+	}
+	if snap[0].TxBytes != 5000 || snap[1].TxBytes != 6000 {
+		t.Fatalf("TxBytes 未覆盖: %+v", snap)
+	}
+	// 远端 ok=false（发送端离线）时不应用，TX 保持本端 0
+	c.SetRemoteTXProvider(func() ([]float64, []uint64, []uint64, bool) {
+		return nil, nil, nil, false
+	})
+	if c.applyRemoteTX(snap) {
+		t.Fatal("ok=false 不应应用")
+	}
 }
 
 func TestStartBadIface(t *testing.T) {

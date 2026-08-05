@@ -247,7 +247,7 @@ func runCLI(mode string, args []string) error {
 		snap := agg.Current(time.Now())
 		txTotal, rxTotal, lost := agg.Totals()
 		fmt.Println()
-		fmt.Print(report.Summary(cfg, snap, txTotal, rxTotal, lost))
+		fmt.Print(report.Summary(cfg, snap, txTotal, rxTotal, lost, true))
 	}
 	return nil
 }
