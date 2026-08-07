@@ -1,13 +1,13 @@
 # qostool — QoS 测试工具
 
 跨平台（Windows / Linux）QoS 流量生成与测量工具：发送 8 条不同 DSCP 优先级的 UDP 流，
-接收端按 DSCP + 5 元组精确匹配，实时统计每条流的收发速率与丢包率。
+接收端按 DSCP + 5 元组精确匹配，实时统计每条流的收发速率、**丢包率、时延与抖动**。
 提供终端实时表格与 Web 曲线页面（默认端口 16666）。
 
 ## 一键构建
 
 ```bash
-bash build.sh v2.6.0   # 一次产出全部平台：Win10/11 app+CLI、Linux amd64/arm64、Win7
+bash build.sh v2.7.0   # 一次产出全部平台：Win10/11 app+CLI、Linux amd64/arm64、Win7
 ```
 
 - 自动处理 Win7 所需的 Go 1.20 工具链（C:\go1.20\go）与依赖降级（gopacket v1.2.0 + x/sys v0.13.0），构建后自动恢复 go.mod
@@ -84,6 +84,7 @@ qostool lsdev                                  # 列出抓包接口
 qostool send  -c configs/example.yaml          # 纯发送（单向测试发送端）
 qostool recv  -c configs/example.yaml -i eth0  # 纯接收（单向测试接收端）
 qostool bidir -c configs/example.yaml -i eth0  # 双向：同时发送与接收统计
+qostool sweep -c configs/example.yaml -i eth0  # 阶梯扫描：自动加压找极限速率
 ```
 
 通用选项：`--web 16666`（Web 端口，`--web off` 关闭）、`-d 秒数`（限时运行）、`--interval 毫秒`（统计采样间隔，默认 100）。
@@ -95,7 +96,48 @@ Web 页面：浏览器打开 `http://<本机IP>:16666`，实时曲线 + 表格�
 见 `configs/example.yaml`。每条流：5 元组（src/dst IP、端口、udp 协议）、`dscp`（0-63 或名字如 EF/AF41/CS7）、
 `rate_mbps` 与 `rate_pps`（双参数限速，至少填一个，取先到者）、`ip_len`（IP 包总长，含 IP/UDP 头，IPv4 最小 38、IPv6 最小 58）。
 
-收发两端必须使用同一份配置；发送载荷内嵌序列号，接收端据此计算丢包率。
+收发两端必须使用同一份配置；发送载荷内嵌序列号与发送时间戳，接收端据此计算丢包率与时延。
+
+### 阈值判定（v2.7.0）
+
+每条流可选配置 3 个阈值，测试过程中实时判定（Web 表格 PASS/FAIL 徽标），停止时汇总进报告：
+
+```yaml
+  max_loss_rate_pct: 0.5   # 丢包率阈值 %（0/缺省=不判定）
+  max_avg_delay_ms: 50     # 平均时延阈值 ms（0/缺省=不判定）
+  max_jitter_ms: 10        # 抖动阈值 ms（0/缺省=不判定）
+```
+
+- 实时判定用最近 100ms 窗口时延；**最终判定与汇总同口径**：丢包 = seq 空洞 + 尾部差（只发不收视为 100% 丢包）
+- 未配置阈值的流不参与判定
+
+### 时延/抖动测量（v2.7.0）
+
+发送载荷头 v2.7.0 起为 18 字节（magic + flow_id + seq + 8 字节发送时间戳）。
+
+- 每流实时统计：平均时延（100ms 窗口）、全程 min/avg/max 时延、RFC3550 抖动
+- **双机无时钟同步时绝对时延不可靠（偏差=时钟差），抖动仍有效**；单机 bidir / 环回自测可报绝对时延
+- 旧版发送端（无时间戳）兼容：时延显示 `—`，抖动/时延阈值自动跳过，丢包统计不受影响
+- 时延曲线显示在 Web 图表右侧独立 Y 轴（ms）
+
+### HTML 测试报告（v2.7.0）
+
+停止时自动生成 `logs/qostool_report_<时间戳>.html`（自包含单文件），含测试信息、每流明细
+（收发/丢包率/时延/抖动/阈值/判定徽标）与结论汇总；Web 页面"导出报告"按钮可随时手动生成；
+CLI 停止时打印报告路径。CSV 日志同时追加每流 `avg_delay_ms_N`、`jitter_ms_N` 列。
+
+### 吞吐量阶梯扫描（v2.7.0）
+
+自动逐档加压，测出每条流"丢包率突破阈值"的极限速率：
+
+```bash
+qostool sweep -c flows.yaml -i eth0 [--step 20] [--hold 10] [--max-scale 10] [--loss-threshold 0.5]
+```
+
+- 所有流从配置速率按比例递增（默认每档 +20%），每档保持 hold 秒（含 0.5s 稳定期）
+- 任一流丢包率超阈值（每流 `max_loss_rate_pct` 优先，否则 `--loss-threshold`）→ **同档再测一个 hold 确认**（防抖动误判）；确认仍越限即停止
+- 输出：每档每流丢包率表 + 极限档位/每流极限速率 + 明细 CSV（`logs/qostool_sweep_<时间戳>.csv`）
+- **仅双向模式**（本机发送+抓包）；双机场景发送端无法得知远端丢包，v2.7.0 不支持
 
 ## 已知限制
 

@@ -10,6 +10,10 @@ flows:
     dscp: EF          # 46
     rate_mbps: 2
     ip_len: 188
+    # 阈值判定（v2.7.0，可选）：0/缺省=不判定；停止时写入 HTML 报告
+    # max_loss_rate_pct: 0.5   # 丢包率阈值 %
+    # max_avg_delay_ms: 50     # 平均时延阈值 ms
+    # max_jitter_ms: 10        # 抖动阈值 ms
   - name: 视频-AF41
     protocol: udp
     src_ip: 192.168.1.10

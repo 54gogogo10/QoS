@@ -29,7 +29,7 @@
 
 `FlowSnapshot` 新增：
 - `DelayValid bool`：是否收到过带时间戳的包
-- `DelayAvgMs float64`：1s 滑动窗口平均时延
+- `DelayAvgMs float64`：最近采样窗口（100ms，每次 Snapshot 清零重计）平均时延
 - `DelayTotAvgMs float64`：全程累计平均时延（报告/最终判定用）
 - `DelayMinMs / DelayMaxMs float64`：全程累计最小/最大
 - `JitterMs float64`：RFC3550 抖动（累计，`J += (|D(i-1,i)| - J)/16`）

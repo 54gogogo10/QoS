@@ -1,11 +1,11 @@
 #!/bin/bash
 # qostool 全平台一键构建脚本
 # 产物：Windows(Win10/11) app+CLI / Linux amd64+arm64 / Windows 7
-# 用法：bash build.sh [版本号]   （版本号默认 v2.6.0，用于 dist 目录名）
+# 用法：bash build.sh [版本号]   （版本号默认 v2.7.0，用于 dist 目录名）
 set -e
 cd "$(dirname "$0")"
 
-VERSION="${1:-v2.6.0}"
+VERSION="${1:-v2.7.0}"
 export CGO_ENABLED=1
 export CGO_CFLAGS="-IC:/WpdPack/Include"
 export CGO_LDFLAGS="-LC:/WpdPack/Lib/x64 -lwpcap"
