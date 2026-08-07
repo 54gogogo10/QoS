@@ -134,3 +134,54 @@ func TestValidateRecvNoRates(t *testing.T) {
 		t.Fatalf("LoadRecv 失败: %v", err)
 	}
 }
+
+// TestThresholdFields 验证阈值字段的 yaml 往返与校验。
+func TestThresholdFields(t *testing.T) {
+	yaml := validYAML + "    max_loss_rate_pct: 0.5\n    max_avg_delay_ms: 50\n    max_jitter_ms: 10\n"
+	cfg, err := Load(writeTemp(t, yaml))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Flows[1].MaxLossRatePct != 0.5 || cfg.Flows[1].MaxAvgDelayMs != 50 || cfg.Flows[1].MaxJitterMs != 10 {
+		t.Fatalf("阈值字段 = %+v", cfg.Flows[1])
+	}
+	if cfg.Flows[0].MaxLossRatePct != 0 || cfg.Flows[0].MaxAvgDelayMs != 0 {
+		t.Fatalf("缺省应为 0: %+v", cfg.Flows[0])
+	}
+	// 保存后重新加载（yaml 往返）
+	p := writeTemp(t, yaml)
+	cfg2, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg2.Save(p); err != nil {
+		t.Fatal(err)
+	}
+	cfg3, err := Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg3.Flows[1].MaxLossRatePct != 0.5 {
+		t.Fatalf("往返后阈值丢失: %+v", cfg3.Flows[1])
+	}
+}
+
+func TestThresholdValidation(t *testing.T) {
+	bad := []struct{ name, field string }{
+		{"负丢包阈值", "max_loss_rate_pct: -1"},
+		{"丢包阈值超100", "max_loss_rate_pct: 101"},
+		{"负时延阈值", "max_avg_delay_ms: -5"},
+		{"负抖动阈值", "max_jitter_ms: -1"},
+	}
+	for _, b := range bad {
+		yaml := "flows:\n  - name: a\n    protocol: udp\n    src_ip: 127.0.0.1\n    dst_ip: 127.0.0.1\n    src_port: 1000\n    dst_port: 2000\n    dscp: 0\n    rate_pps: 100\n    ip_len: 92\n    " + b.field + "\n"
+		if _, err := Load(writeTemp(t, yaml)); err == nil {
+			t.Fatalf("%s 应校验失败", b.name)
+		}
+	}
+	// 接收端校验（无速率）同样拒绝非法阈值
+	yaml := "flows:\n  - name: a\n    protocol: udp\n    src_ip: 127.0.0.1\n    dst_ip: 127.0.0.1\n    src_port: 1000\n    dst_port: 2000\n    dscp: 0\n    max_loss_rate_pct: 101\n"
+	if _, err := LoadRecv(writeTemp(t, yaml)); err == nil {
+		t.Fatal("接收端也应拒绝非法阈值")
+	}
+}

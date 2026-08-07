@@ -20,6 +20,11 @@ type Flow struct {
 	RateMbps    float64 `yaml:"rate_mbps,omitempty"`
 	RatePPS     float64 `yaml:"rate_pps,omitempty"`
 	IPLen       int     `yaml:"ip_len,omitempty"` // IP 包总长（IP 头+UDP 头+载荷）
+
+	// 阈值判定（v2.7.0）：0/缺省 = 不判定
+	MaxLossRatePct float64 `yaml:"max_loss_rate_pct,omitempty"` // 丢包率阈值 %
+	MaxAvgDelayMs  float64 `yaml:"max_avg_delay_ms,omitempty"`  // 平均时延阈值 ms
+	MaxJitterMs    float64 `yaml:"max_jitter_ms,omitempty"`     // 抖动阈值 ms
 }
 
 // Config 是一份完整配置，收发两端共用同一份。
@@ -108,6 +113,15 @@ func (c *Config) validate(requireRates bool) error {
 		}
 		if f.Protocol != "udp" {
 			return fmt.Errorf("flow %d (%s): 仅支持 udp 协议", i+1, f.Name)
+		}
+		if f.MaxLossRatePct < 0 || f.MaxLossRatePct > 100 {
+			return fmt.Errorf("flow %d (%s): max_loss_rate_pct 必须在 0-100", i+1, f.Name)
+		}
+		if f.MaxAvgDelayMs < 0 {
+			return fmt.Errorf("flow %d (%s): max_avg_delay_ms 不能为负", i+1, f.Name)
+		}
+		if f.MaxJitterMs < 0 {
+			return fmt.Errorf("flow %d (%s): max_jitter_ms 不能为负", i+1, f.Name)
 		}
 		src := net.ParseIP(f.SrcIP)
 		dst := net.ParseIP(f.DstIP)
