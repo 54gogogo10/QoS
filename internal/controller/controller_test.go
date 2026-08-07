@@ -186,7 +186,9 @@ func TestStopGeneratesHTMLReport(t *testing.T) {
 	c.SetLogDir(dir)
 	agg := stats.NewAggregator(1, 10)
 	agg.RecordTx(0, 100, 10000)
-	agg.RecordRx(0, 100, 100, time.Now(), time.Now().Add(-time.Millisecond).UnixNano())
+	now := time.Now()
+	agg.RecordRx(0, 100, 1, now, now.Add(-time.Millisecond).UnixNano())
+	agg.RecordRx(0, 100, 5, now, now.Add(-time.Millisecond).UnixNano()) // seq 2-4 丢失
 	c.SetAggregatorForTest(agg)
 	c.Stop()
 	if !strings.HasSuffix(c.LastReportPath(), ".html") {
