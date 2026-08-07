@@ -21,8 +21,8 @@ type FlowSnapshot struct {
 	LossRate  float64 // 0..1
 
 	// 时延/抖动（v2.7.0）：DelayValid=false 表示发送端无时间戳（旧版本），其余字段为 0。
-	DelayValid   bool    // 是否收到过带时间戳的包
-	DelayAvgMs   float64 // 1s 滑动窗口平均时延（毫秒）
+	DelayValid   bool     // 是否收到过带时间戳的包
+	DelayAvgMs   float64  // 最近采样窗口（100ms）平均时延（毫秒）
 	DelayTotAvgMs float64 // 全程累计平均时延（毫秒，报告/最终判定用）
 	DelayMinMs   float64 // 全程最小（毫秒）
 	DelayMaxMs   float64 // 全程最大（毫秒）

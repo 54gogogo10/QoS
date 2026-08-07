@@ -16,6 +16,7 @@ import (
 
 	"qostool/internal/config"
 	"qostool/internal/controller"
+	"qostool/internal/report"
 )
 
 //go:embed static/index.html
@@ -107,6 +108,7 @@ func (s *Server) ListenAndServe(addr string) error {
 	mux.HandleFunc("/api/receivers", s.handleReceivers)
 	mux.HandleFunc("/api/iface", s.handleIfaceSel)
 	mux.HandleFunc("/api/tx_stats", s.handleTxStats)
+	mux.HandleFunc("/api/report", s.handleReport)
 	mux.HandleFunc("/", s.handleIndex)
 	s.srv = &http.Server{
 		Addr:              addr,
@@ -176,12 +178,22 @@ type apiFlow struct {
 	RxBytes   uint64  `json:"rx_bytes"`
 	Lost      uint64  `json:"lost"`
 	LossRate  float64 `json:"loss_rate"`
+
+	// v2.7.0：时延/抖动与阈值判定（delay_valid=false 表示发送端无时间戳）
+	DelayValid   bool    `json:"delay_valid"`
+	DelayAvgMs   float64 `json:"delay_avg_ms"`
+	DelayTotAvgMs float64 `json:"delay_tot_avg_ms"`
+	DelayMinMs   float64 `json:"delay_min_ms"`
+	DelayMaxMs   float64 `json:"delay_max_ms"`
+	JitterMs     float64 `json:"jitter_ms"`
+	Verdict      string  `json:"verdict"` // "pass"/"fail"/""（未配置阈值）
 }
 
 type apiHistory struct {
 	T  []int64     `json:"t"`
 	Tx [][]float64 `json:"tx"`
 	Rx [][]float64 `json:"rx"`
+	Dly [][]float64 `json:"dly"` // v2.7.0 每流窗口平均时延 ms（无效=-1）
 }
 
 type apiConfigFlow struct {
@@ -195,6 +207,11 @@ type apiConfigFlow struct {
 	RateMbps    float64 `json:"rate_mbps"`
 	RatePPS     float64 `json:"rate_pps"`
 	IPLen       int     `json:"ip_len"` // IP 包总长
+
+	// v2.7.0 阈值判定（0=不判定）
+	MaxLossRatePct float64 `json:"max_loss_rate_pct"`
+	MaxAvgDelayMs  float64 `json:"max_avg_delay_ms"`
+	MaxJitterMs    float64 `json:"max_jitter_ms"`
 }
 
 type apiConfig struct {
@@ -223,6 +240,9 @@ func (a *apiConfig) toConfig(requireRates bool) (*config.Config, error) {
 			RateMbps: f.RateMbps,
 			RatePPS:  f.RatePPS,
 			IPLen:    f.IPLen,
+			MaxLossRatePct: f.MaxLossRatePct,
+			MaxAvgDelayMs:  f.MaxAvgDelayMs,
+			MaxJitterMs:    f.MaxJitterMs,
 		})
 	}
 	if requireRates {
@@ -246,6 +266,9 @@ func (s *Server) configToAPI(cfg *config.Config) apiConfig {
 			RateMbps: f.RateMbps,
 			RatePPS:  f.RatePPS,
 			IPLen:    f.IPLen,
+			MaxLossRatePct: f.MaxLossRatePct,
+			MaxAvgDelayMs:  f.MaxAvgDelayMs,
+			MaxJitterMs:    f.MaxJitterMs,
 		}
 	}
 	return out
@@ -289,9 +312,19 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		snap := agg.Current(now)
 		hist := agg.History()
 		out.Flows = make([]apiFlow, len(snap))
-		out.History = apiHistory{T: hist.T, Tx: hist.TxB, Rx: hist.RxB}
+		out.History = apiHistory{T: hist.T, Tx: hist.TxB, Rx: hist.RxB, Dly: hist.Dly}
+		// v2.7.0：阈值判定用窗口时延（实时响应），未配置阈值的流 verdict=""
+		vs := report.Verdicts(cfg, snap, false)
 		for i, f := range cfg.Flows {
 			sf := snap[i]
+			v := ""
+			if vs[i].Checked {
+				if vs[i].Pass {
+					v = "pass"
+				} else {
+					v = "fail"
+				}
+			}
 			out.Flows[i] = apiFlow{
 				Idx: i, Name: f.Name, DSCP: int(f.DSCP),
 				SrcIP: f.SrcIP, DstIP: f.DstIP, SrcPort: f.SrcPort, DstPort: f.DstPort,
@@ -299,6 +332,9 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 				TxPackets: sf.TxPackets, TxBytes: sf.TxBytes,
 				RxPackets: sf.RxPackets, RxBytes: sf.RxBytes,
 				Lost: sf.Lost, LossRate: sf.LossRate,
+				DelayValid: sf.DelayValid, DelayAvgMs: sf.DelayAvgMs, DelayTotAvgMs: sf.DelayTotAvgMs,
+				DelayMinMs: sf.DelayMinMs, DelayMaxMs: sf.DelayMaxMs, JitterMs: sf.JitterMs,
+				Verdict: v,
 			}
 		}
 	}
@@ -323,10 +359,11 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	type roleStatus struct {
-		Running bool      `json:"running"`
-		Iface   string    `json:"iface"`
-		Started time.Time `json:"started"`
-		LogFile string    `json:"log_file"`
+		Running    bool      `json:"running"`
+		Iface      string    `json:"iface"`
+		Started    time.Time `json:"started"`
+		LogFile    string    `json:"log_file"`
+		ReportFile string    `json:"report_file"` // v2.7.0 最近一次 HTML 报告路径
 	}
 	out := struct {
 		Send          roleStatus `json:"send"`
@@ -340,7 +377,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, m := range []controller.Mode{controller.ModeSend, controller.ModeRecv, controller.ModeBidir} {
 		st := s.ctrl(m).Status()
-		rs := roleStatus{Running: st.Running, Iface: st.Iface, Started: st.Started, LogFile: st.LogFile}
+		rs := roleStatus{Running: st.Running, Iface: st.Iface, Started: st.Started, LogFile: st.LogFile, ReportFile: st.ReportFile}
 		switch m {
 		case controller.ModeSend:
 			out.Send = rs
@@ -624,6 +661,27 @@ func NotifyPeerListen(addr string) string {
 		return "接收端拒绝: " + string(b)
 	}
 	return ""
+}
+
+// handleReport 按当前（或上次）统计立即生成 HTML 报告（导出按钮）。
+func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.requireControl(w, r) {
+		return
+	}
+	m := modeFromQuery(r)
+	path, err := s.ctrl(m).WriteHTMLReport()
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "生成报告失败: "+err.Error())
+		return
+	}
+	writeJSON(w, struct {
+		OK   bool   `json:"ok"`
+		Path string `json:"path"`
+	}{OK: true, Path: path})
 }
 
 // handleRemote 设置发送端地址（接收端拉取其 TX 统计并统一显示）。
