@@ -53,8 +53,8 @@ func buildIPv6UDP(dscp byte, srcIP, dstIP net.IP, srcPort, dstPort uint16, paylo
 }
 
 func TestParseIPv4UDP(t *testing.T) {
-	payload := make([]byte, 16)
-	protocol.EncodeHeader(payload, 1, 99)
+	payload := make([]byte, 18) // 新载荷头 18B（含时间戳）
+	protocol.EncodeHeader(payload, 1, 99, 0)
 	pkt, err := parsePacket(buildIPv4UDP(46, net.ParseIP("192.168.1.1"), net.ParseIP("192.168.1.2"), 1000, 2000, payload))
 	if err != nil {
 		t.Fatal(err)
@@ -68,15 +68,15 @@ func TestParseIPv4UDP(t *testing.T) {
 	if pkt.key.SrcPort != 1000 || pkt.key.DstPort != 2000 {
 		t.Fatalf("端口 = %d/%d", pkt.key.SrcPort, pkt.key.DstPort)
 	}
-	fid, seq, ok := protocol.DecodeHeader(pkt.payload)
+	fid, seq, _, ok := protocol.DecodeHeader(pkt.payload)
 	if !ok || fid != 1 || seq != 99 {
 		t.Fatalf("载荷解码 = %d/%d/%v", fid, seq, ok)
 	}
 }
 
 func TestParseIPv6UDP(t *testing.T) {
-	payload := make([]byte, 16)
-	protocol.EncodeHeader(payload, 2, 7)
+	payload := make([]byte, 18) // 新载荷头 18B（含时间戳）
+	protocol.EncodeHeader(payload, 2, 7, 0)
 	pkt, err := parsePacket(buildIPv6UDP(34, net.ParseIP("2001:db8::1"), net.ParseIP("2001:db8::2"), 1000, 2000, payload))
 	if err != nil {
 		t.Fatal(err)
@@ -87,7 +87,7 @@ func TestParseIPv6UDP(t *testing.T) {
 	if !pkt.key.SrcIP.Equal(net.ParseIP("2001:db8::1")) {
 		t.Fatalf("SrcIP = %v", pkt.key.SrcIP)
 	}
-	fid, seq, ok := protocol.DecodeHeader(pkt.payload)
+	fid, seq, _, ok := protocol.DecodeHeader(pkt.payload)
 	if !ok || fid != 2 || seq != 7 {
 		t.Fatalf("载荷解码 = %d/%d/%v", fid, seq, ok)
 	}

@@ -3,7 +3,6 @@ package sender
 
 import (
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log"
@@ -106,7 +105,7 @@ func newFlow(idx int, cfg config.Flow, agg *stats.Aggregator) (*flow, error) {
 	}
 	// cfg.IPLen 是 IP 包总长：载荷 = IP 包长 - IP/UDP 头
 	payload := make([]byte, cfg.IPLen-wireOverhead)
-	protocol.EncodeHeader(payload, uint16(idx), 0)
+	protocol.EncodeHeader(payload, uint16(idx), 0, 0)
 	f := &flow{
 		idx:          idx,
 		conn:         conn,
@@ -158,7 +157,7 @@ func (f *flow) run(ctx context.Context) {
 		}
 		for i := 0; i < f.batch; i++ {
 			f.seq++
-			binary.BigEndian.PutUint32(f.payload[protocol.HeaderSize-4:protocol.HeaderSize], f.seq)
+			protocol.EncodeSeqTs(f.payload, f.seq, time.Now().UnixNano())
 			if _, err := f.conn.Write(f.payload); err != nil {
 				// Linux：UDP connect 到未监听端口会收到 ICMP port unreachable，
 				// 后续 Write 返回 ECONNREFUSED——但包已实际发出（ICMP 为异步返回），不能停流。

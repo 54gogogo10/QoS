@@ -136,7 +136,7 @@ func (c *Capturer) Run(ctx context.Context) error {
 				}
 				continue
 			}
-			fid, seq, ok := protocol.DecodeHeader(pkt.payload)
+			fid, seq, _, ok := protocol.DecodeHeader(pkt.payload)
 			if !ok || int(fid) != idx {
 				c.otherPkts.Add(1) // 非本工具流量或 flow_id 不一致
 				continue

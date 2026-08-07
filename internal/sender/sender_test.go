@@ -45,7 +45,7 @@ func TestSenderPacingLocalhost(t *testing.T) {
 		if err != nil {
 			break
 		}
-		fid, seq, ok := protocol.DecodeHeader(buf[:n])
+		fid, seq, _, ok := protocol.DecodeHeader(buf[:n])
 		if !ok {
 			t.Fatal("载荷 magic 错误")
 		}
