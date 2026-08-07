@@ -334,7 +334,11 @@ func runSweep(args []string) error {
 	} else {
 		fmt.Printf("结论: 极限档位 = %.2fx（最后一档全部通过）\n", res.LimitScale)
 		for i, f := range cfg.Flows {
-			fmt.Printf("  %-12s 极限 %.2f Mbps\n", f.Name, res.LimitMbps[i])
+			if f.RateMbps > 0 {
+				fmt.Printf("  %-12s 极限 %.2f Mbps\n", f.Name, res.LimitMbps[i])
+			} else {
+				fmt.Printf("  %-12s 极限 %.0f pps\n", f.Name, f.RatePPS*res.LimitScale)
+			}
 		}
 	}
 	fmt.Println("结束原因:", res.DoneReason)
