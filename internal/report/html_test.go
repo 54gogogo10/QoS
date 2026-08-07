@@ -23,7 +23,7 @@ func TestHTMLReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(data)
-	for _, want := range []string{"汇总报告", "EF-语音", "FAIL", "0.5", "eth0", "v2.7.0", "丢包率 1.00% > 0.50%"} {
+	for _, want := range []string{"汇总报告", "EF-语音", "FAIL", "0.5", "eth0", "v2.7.0", "违反: 丢包率 1.00%"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("报告缺少 %q", want)
 		}
