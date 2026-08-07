@@ -104,7 +104,7 @@ func TestSummaryTailDiff(t *testing.T) {
 		RxPackets: 998, RxBytes: 998000, Lost: 0,
 	}}
 	out := Summary(testCfg(), snap, 1e6, 998000, 0, true)
-	if !strings.Contains(out, "2\n") && !strings.Contains(out, "         2\n") {
+	if !strings.Contains(out, "2                —") {
 		t.Fatalf("尾部差未计入丢包:\n%s", out)
 	}
 	// 完全一致 → 丢包 0
@@ -113,7 +113,7 @@ func TestSummaryTailDiff(t *testing.T) {
 		RxPackets: 1000, RxBytes: 1e6, Lost: 0,
 	}}
 	out2 := Summary(testCfg(), snap2, 1e6, 1e6, 0, true)
-	if !strings.Contains(out2, "0\n") || !strings.Contains(out2, "* 丢包 = seq 空洞丢失") {
+	if !strings.Contains(out2, "0                —") || !strings.Contains(out2, "* 丢包 = seq 空洞丢失") {
 		t.Fatalf("一致时丢包应为 0 且含口径说明:\n%s", out2)
 	}
 }
@@ -127,7 +127,7 @@ func TestSummaryNoTailDiffWithRemote(t *testing.T) {
 		RxPackets: 1000, RxBytes: 1e6, Lost: 0,
 	}}
 	out := Summary(testCfg(), snap, 1e6, 1e6, 0, false)
-	if !strings.Contains(out, "0\n") {
+	if !strings.Contains(out, "0                —") {
 		t.Fatalf("recv 远端 TX 模式丢包应为 0（尾部差不计入）:\n%s", out)
 	}
 }
