@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"qostool/internal/config"
 	"qostool/internal/controller"
 	"qostool/internal/report"
+	"qostool/internal/sweep"
 	"qostool/internal/web"
 )
 
@@ -37,14 +39,14 @@ func main() {
 	}
 	mode := os.Args[1]
 	switch mode {
-	case "send", "recv", "bidir", "lsdev", "app":
+	case "send", "recv", "bidir", "lsdev", "app", "sweep":
 	default:
 		fmt.Fprintf(os.Stderr, "未知命令 %q\n", mode)
 		usage()
 		os.Exit(2)
 	}
-	if mode == "app" {
-		if err := runApp(); err != nil {
+	if mode == "sweep" {
+		if err := runSweep(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, "错误:", err)
 			os.Exit(1)
 		}
@@ -64,6 +66,7 @@ func usage() {
   qostool send   -c flows.yaml [--web 16666] [-d 秒]  纯发送
   qostool recv   -c flows.yaml -i 接口 [--web 16666] [-d 秒]  纯接收
   qostool bidir  -c flows.yaml -i 接口 [--web 16666] [-d 秒]  双向发送+接收
+  qostool sweep  -c flows.yaml -i 接口 [--step 20] [--hold 10] [--max-scale 10] [--loss-threshold 0.5]  阶梯扫描（双向，自动加压找极限）
   qostool lsdev                                  列出可用的抓包接口
 `)
 }
@@ -249,6 +252,121 @@ func runCLI(mode string, args []string) error {
 		fmt.Println()
 		fmt.Print(report.Summary(cfg, snap, txTotal, rxTotal, lost, true))
 	}
+	if p := ctrl.LastReportPath(); p != "" {
+		fmt.Println("HTML 报告:", p)
+	}
+	return nil
+}
+
+// runSweep 吞吐量阶梯扫描：逐档加压找每流极限速率（仅双向，需本机抓包）。
+func runSweep(args []string) error {
+	fs := flag.NewFlagSet("sweep", flag.ExitOnError)
+	cfgPath := fs.String("c", "", "配置文件路径 (yaml)")
+	iface := fs.String("i", "", "监听接口")
+	stepPct := fs.Float64("step", 20, "每档递增百分比")
+	hold := fs.Int("hold", 10, "每档保持秒数")
+	maxScale := fs.Float64("max-scale", 10, "最大倍率")
+	lossTh := fs.Float64("loss-threshold", 0.5, "丢包率阈值 %（被每流 max_loss_rate_pct 覆盖）")
+	fs.Parse(args)
+
+	if *cfgPath == "" {
+		return fmt.Errorf("缺少 -c 配置文件")
+	}
+	if *iface == "" {
+		return fmt.Errorf("缺少 -i 监听接口")
+	}
+	if *stepPct <= 0 || *stepPct >= 100 {
+		return fmt.Errorf("step 必须在 0-100 之间")
+	}
+	if *hold < 2 {
+		return fmt.Errorf("hold 不能小于 2 秒（含 0.5s settle）")
+	}
+	if *maxScale <= 1 {
+		return fmt.Errorf("max-scale 必须大于 1")
+	}
+	if *lossTh <= 0 || *lossTh > 100 {
+		return fmt.Errorf("loss-threshold 必须在 0-100")
+	}
+
+	cfg, err := config.Load(*cfgPath)
+	if err != nil {
+		return err
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	fmt.Printf("=== 阶梯扫描：起始速率按 %.0f%% 递增，每档保持 %ds，丢包阈值 %.2f%% ===\n", *stepPct, *hold, *lossTh)
+	res, err := sweep.Run(ctx, cfg, *iface, sweep.Options{
+		StepPct: *stepPct, Hold: time.Duration(*hold) * time.Second,
+		MaxScale: *maxScale, LossThresholdPct: *lossTh,
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	if res == nil {
+		return nil // Ctrl+C 中断
+	}
+
+	// 逐步打印结果表
+	var b strings.Builder
+	b.WriteString("档位   倍率   ")
+	for _, f := range cfg.Flows {
+		b.WriteString(fmt.Sprintf("%-12s", f.Name))
+	}
+	b.WriteString("\n")
+	for i, st := range res.Steps {
+		b.WriteString(fmt.Sprintf("%-6d %-6.2f ", i+1, st.Scale))
+		for _, l := range st.LossPct {
+			if l < 0 {
+				b.WriteString(fmt.Sprintf("%-12s", "无数据"))
+			} else {
+				b.WriteString(fmt.Sprintf("%-12s", fmt.Sprintf("%.2f%%", l)))
+			}
+		}
+		b.WriteString("\n")
+	}
+	fmt.Print(b.String())
+
+	// 结论
+	if res.LimitScale <= 0 {
+		fmt.Println("结论: 起始档（1.0x）即越限，极限速率低于配置的 base 速率")
+	} else {
+		fmt.Printf("结论: 极限档位 = %.2fx（最后一档全部通过）\n", res.LimitScale)
+		for i, f := range cfg.Flows {
+			fmt.Printf("  %-12s 极限 %.2f Mbps\n", f.Name, res.LimitMbps[i])
+		}
+	}
+	fmt.Println("结束原因:", res.DoneReason)
+
+	// 汇总 CSV 到配置目录 logs/
+	logDir := filepath.Join(filepath.Dir(*cfgPath), "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return err
+	}
+	csvPath := filepath.Join(logDir, fmt.Sprintf("qostool_sweep_%s.csv", time.Now().Format("20060102_150405")))
+	f, err := os.Create(csvPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	w := csv.NewWriter(f)
+	rec := []string{"档位", "倍率"}
+	for _, fl := range cfg.Flows {
+		rec = append(rec, fl.Name+" 丢包%")
+	}
+	w.Write(rec)
+	for i, st := range res.Steps {
+		rec := []string{fmt.Sprintf("%d", i+1), fmt.Sprintf("%.2f", st.Scale)}
+		for _, l := range st.LossPct {
+			rec = append(rec, fmt.Sprintf("%.3f", l))
+		}
+		w.Write(rec)
+	}
+	rec = []string{"极限倍率", fmt.Sprintf("%.2f", res.LimitScale)}
+	w.Write(rec)
+	w.Flush()
+	fmt.Println("扫描明细 CSV:", csvPath)
 	return nil
 }
 

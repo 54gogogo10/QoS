@@ -16,16 +16,28 @@ type Verdict struct {
 }
 
 // Verdicts 判定全部流。
-// useTotDelay=true 用全程累计平均时延（最终报告/汇总），false 用 1s 窗口平均（Web 实时）。
-// 无阈值配置的流 Checked=false；无数据时对应项不判定。
-func Verdicts(cfg *config.Config, snap []stats.FlowSnapshot, useTotDelay bool) []Verdict {
+// final=true 为最终判定（报告/汇总）：时延用全程累计平均，丢包与汇总口径一致（seq 空洞 + 尾部差）；
+// final=false 为实时判定（Web）：时延用 100ms 窗口平均，丢包仅 seq 空洞（避免测试启动瞬间误报）。
+// 无阈值配置的流 Checked=false；无数据时对应项不判定（最终判定下"只发不收"视为 100% 丢包）。
+func Verdicts(cfg *config.Config, snap []stats.FlowSnapshot, final bool) []Verdict {
 	out := make([]Verdict, len(cfg.Flows))
 	for i, f := range cfg.Flows {
 		s := snap[i]
 		v := Verdict{FlowIdx: i, Pass: true}
-		if f.MaxLossRatePct > 0 && (s.RxPackets > 0 || s.Lost > 0) {
+		if f.MaxLossRatePct > 0 && (s.RxPackets > 0 || s.Lost > 0 || (final && s.TxPackets > 0)) {
 			v.Checked = true
-			if pct := s.LossRate * 100; pct > f.MaxLossRatePct {
+			pct := s.LossRate * 100
+			if final {
+				// 最终口径 = 汇总口径：seq 空洞 + 尾部差（发而未收）
+				effLost := s.Lost
+				if s.TxPackets > s.RxPackets+s.Lost {
+					effLost += s.TxPackets - s.RxPackets - s.Lost
+				}
+				if exp := s.RxPackets + effLost; exp > 0 {
+					pct = float64(effLost) / float64(exp) * 100
+				}
+			}
+			if pct > f.MaxLossRatePct {
 				v.Pass = false
 				v.FailMsg = fmt.Sprintf("丢包率 %.2f%% > %.2f%%", pct, f.MaxLossRatePct)
 			}
@@ -33,7 +45,7 @@ func Verdicts(cfg *config.Config, snap []stats.FlowSnapshot, useTotDelay bool) [
 		if f.MaxAvgDelayMs > 0 && s.DelayValid {
 			v.Checked = true
 			avg := s.DelayAvgMs
-			if useTotDelay {
+			if final {
 				avg = s.DelayTotAvgMs
 			}
 			if avg > f.MaxAvgDelayMs {

@@ -70,3 +70,34 @@ func TestVerdictNoDataSkipsLossCheck(t *testing.T) {
 		t.Fatal("无收发数据不应判丢包 FAIL")
 	}
 }
+
+// TestVerdictFinalBlackHole 最终判定：只发不收（尾部差 100%）必须 FAIL。
+func TestVerdictFinalBlackHole(t *testing.T) {
+	cfg := &config.Config{Flows: []config.Flow{{Name: "a", MaxLossRatePct: 1.0}}}
+	snap := []stats.FlowSnapshot{{FlowIdx: 0, TxPackets: 2000, RxPackets: 0, Lost: 0}}
+	if vs := Verdicts(cfg, snap, true); vs[0].Pass {
+		t.Fatalf("只发不收最终判定应 FAIL, got %+v", vs[0])
+	}
+	// 实时判定：未收到任何包不判（避免启动瞬间误报）
+	if vs := Verdicts(cfg, snap, false); !vs[0].Pass {
+		t.Fatalf("实时判定无数据不应 FAIL, got %+v", vs[0])
+	}
+}
+
+// TestVerdictFinalTailDiff 最终判定丢包口径 = seq 空洞 + 尾部差。
+func TestVerdictFinalTailDiff(t *testing.T) {
+	cfg := &config.Config{Flows: []config.Flow{{Name: "a", MaxLossRatePct: 0.5}}}
+	// TX 1000, RX 998, 空洞 0 → 尾部差 2 → 0.2% < 0.5% → PASS
+	snap := []stats.FlowSnapshot{{FlowIdx: 0, TxPackets: 1000, RxPackets: 998, Lost: 0}}
+	if vs := Verdicts(cfg, snap, true); !vs[0].Pass {
+		t.Fatalf("尾部差 2 包应 PASS, got %+v", vs[0])
+	}
+	// TX 1000, RX 990, 空洞 0 → 1% > 0.5% → FAIL（实时口径 0% 会误判 PASS）
+	snap2 := []stats.FlowSnapshot{{FlowIdx: 0, TxPackets: 1000, RxPackets: 990, Lost: 0}}
+	if vs := Verdicts(cfg, snap2, true); vs[0].Pass {
+		t.Fatalf("尾部差 10 包最终应 FAIL, got %+v", vs[0])
+	}
+	if vs := Verdicts(cfg, snap2, false); !vs[0].Pass {
+		t.Fatalf("实时口径无 seq 空洞应 PASS, got %+v", vs[0])
+	}
+}

@@ -11,3 +11,8 @@ qostool-win7.exe
 qostool-linux-amd64
 qostool-linux-arm64
 tools/*.dll
+
+# app 模式自动生成的配置（默认落盘 exe 同目录）
+/config.yaml
+/config-send.yaml
+/config-recv.yaml
