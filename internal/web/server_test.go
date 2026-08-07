@@ -31,8 +31,8 @@ func newTestServer() *Server {
 func injectAgg(s *Server) {
 	agg := stats.NewAggregator(1, 10)
 	agg.RecordTx(0, 100, 1000)
-	agg.RecordRx(0, 500, 1)
-	agg.RecordRx(0, 500, 5)
+	agg.RecordRx(0, 500, 1, time.Now(), 0)
+	agg.RecordRx(0, 500, 5, time.Now(), 0)
 	agg.Snapshot(time.Now())
 	s.ctrl(controller.ModeBidir).SetAggregatorForTest(agg)
 }

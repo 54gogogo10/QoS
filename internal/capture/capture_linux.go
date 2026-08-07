@@ -136,13 +136,14 @@ func (c *Capturer) Run(ctx context.Context) error {
 				}
 				continue
 			}
-			fid, seq, _, ok := protocol.DecodeHeader(pkt.payload)
+			fid, seq, sendTs, ok := protocol.DecodeHeader(pkt.payload)
 			if !ok || int(fid) != idx {
 				c.otherPkts.Add(1) // 非本工具流量或 flow_id 不一致
 				continue
 			}
 			c.matchedPkts.Add(1)
-			c.agg.RecordRx(idx, uint64(len(ip)), seq)
+			// AF_PACKET 无内核时间戳：用处理时刻（与发送时间戳同为本地时钟，环回/单机场景有效）
+			c.agg.RecordRx(idx, uint64(len(ip)), seq, time.Now(), sendTs)
 		}
 		select {
 		case <-ctx.Done():
