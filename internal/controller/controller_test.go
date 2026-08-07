@@ -176,3 +176,27 @@ func TestLogAndDataRetention(t *testing.T) {
 		t.Fatalf("汇总内容错误: %s", sumData)
 	}
 }
+
+// TestStopGeneratesHTMLReport 验证停止后自动生成 HTML 报告并记录路径。
+func TestStopGeneratesHTMLReport(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testCfg()
+	cfg.Flows[0].MaxLossRatePct = 0.5
+	c := New(cfg, ModeBidir)
+	c.SetLogDir(dir)
+	agg := stats.NewAggregator(1, 10)
+	agg.RecordTx(0, 100, 10000)
+	agg.RecordRx(0, 100, 100, time.Now(), time.Now().Add(-time.Millisecond).UnixNano())
+	c.SetAggregatorForTest(agg)
+	c.Stop()
+	if !strings.HasSuffix(c.LastReportPath(), ".html") {
+		t.Fatalf("LastReportPath = %q, want html", c.LastReportPath())
+	}
+	if _, err := os.Stat(c.LastReportPath()); err != nil {
+		t.Fatalf("报告文件不存在: %v", err)
+	}
+	data, _ := os.ReadFile(c.LastReportPath())
+	if !strings.Contains(string(data), "FAIL") {
+		t.Fatal("1%% 丢包超 0.5%% 阈值应生成 FAIL 报告")
+	}
+}

@@ -37,10 +37,11 @@ const (
 
 // Status 描述当前运行状态。
 type Status struct {
-	Running bool      `json:"running"`
-	Iface   string    `json:"iface"`
-	Started time.Time `json:"started"`
-	LogFile string    `json:"log_file"` // 本次运行的 CSV 日志路径（空=未启用）
+	Running    bool      `json:"running"`
+	Iface      string    `json:"iface"`
+	Started    time.Time `json:"started"`
+	LogFile    string    `json:"log_file"`    // 本次运行的 CSV 日志路径（空=未启用）
+	ReportFile string    `json:"report_file"` // 最近一次生成的 HTML 报告路径（空=未生成）
 }
 
 // Controller 持有配置与运行状态。Start 启动一轮测试，Stop 停止。
@@ -66,6 +67,7 @@ type Controller struct {
 	logFile    *os.File
 	csvW       *csv.Writer
 	logPath    string // 本次 CSV 日志路径
+	lastReportPath string // 最近一次生成的 HTML 报告路径（停止时/导出按钮）
 }
 
 // New 创建控制器。
@@ -252,7 +254,40 @@ func (c *Controller) IfaceStats() capture.IfaceStats {
 func (c *Controller) Status() Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return Status{Running: c.running, Iface: c.iface, Started: c.started, LogFile: c.logPath}
+	return Status{Running: c.running, Iface: c.iface, Started: c.started, LogFile: c.logPath, ReportFile: c.lastReportPath}
+}
+
+// LastReportPath 返回最近一次生成的 HTML 报告路径（空=未生成）。
+func (c *Controller) LastReportPath() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastReportPath
+}
+
+// WriteHTMLReport 按当前（或上次）统计立即生成 HTML 报告（Web 导出按钮用）。
+func (c *Controller) WriteHTMLReport() (string, error) {
+	c.mu.Lock()
+	agg, cfg, logDir := c.agg, c.cfg, c.logDir
+	if agg == nil {
+		agg = c.lastAgg
+	}
+	st := Status{Running: c.running, Iface: c.iface, Started: c.started}
+	c.mu.Unlock()
+	if agg == nil || logDir == "" {
+		return "", fmt.Errorf("无统计数据或未设置日志目录")
+	}
+	snap := agg.Current(time.Now())
+	vs := report.Verdicts(cfg, snap, true)
+	path, err := report.HTMLReport(cfg, snap, vs, report.ReportMeta{
+		Started: st.Started, Stopped: time.Now(), Iface: st.Iface, Mode: string(c.mode), Version: "v2.7.0",
+	}, filepath.Join(logDir, "logs"))
+	if err != nil {
+		return "", err
+	}
+	c.mu.Lock()
+	c.lastReportPath = path
+	c.mu.Unlock()
+	return path, nil
 }
 
 // SetAggregatorForTest 仅供测试注入聚合器（标记为运行中）。
@@ -372,6 +407,15 @@ func (c *Controller) openLogLocked(start time.Time) {
 	}
 	c.csvW.Write(rec)
 	c.csvW.Flush()
+	// v2.7.0 追加时延/抖动列（每秒一行，末尾列，不影响旧列顺序）
+	for i := range c.cfg.Flows {
+		rec = append(rec, fmt.Sprintf("avg_delay_ms_%d", i+1))
+	}
+	for i := range c.cfg.Flows {
+		rec = append(rec, fmt.Sprintf("jitter_ms_%d", i+1))
+	}
+	c.csvW.Write(rec)
+	c.csvW.Flush()
 }
 
 // writeLogRow 写一行 1s 粒度的统计（调用方持有锁）。
@@ -390,6 +434,20 @@ func (c *Controller) writeLogRow(now time.Time, agg *stats.Aggregator) {
 	}
 	for _, s := range snap {
 		rec = append(rec, fmt.Sprintf("%.3f", s.LossRate*100))
+	}
+	for _, s := range snap {
+		if s.DelayValid {
+			rec = append(rec, fmt.Sprintf("%.3f", s.DelayAvgMs))
+		} else {
+			rec = append(rec, "")
+		}
+	}
+	for _, s := range snap {
+		if s.DelayValid {
+			rec = append(rec, fmt.Sprintf("%.3f", s.JitterMs))
+		} else {
+			rec = append(rec, "")
+		}
 	}
 	c.csvW.Write(rec)
 	c.csvW.Flush()
@@ -420,8 +478,19 @@ func (c *Controller) applyRemoteTX(snap []stats.FlowSnapshot) bool {
 	return true
 }
 
-// closeLogLocked 关闭 CSV 并写出汇总 txt（调用方持有锁）。
+// closeLogLocked 关闭 CSV 并写出汇总 txt 与 HTML 报告（调用方持有锁）。
 func (c *Controller) closeLogLocked(agg *stats.Aggregator, started time.Time, iface string, stopped time.Time) {
+	// HTML 报告与 CSV 解耦：无日志文件也生成（导出/CLI 场景）
+	if agg != nil {
+		snap := agg.Current(stopped)
+		if path, err := report.HTMLReport(c.cfg, snap, report.Verdicts(c.cfg, snap, true), report.ReportMeta{
+			Started: started, Stopped: stopped, Iface: iface, Mode: string(c.mode), Version: "v2.7.0",
+		}, filepath.Join(c.logDir, "logs")); err != nil {
+			log.Printf("生成 HTML 报告失败: %v", err)
+		} else {
+			c.lastReportPath = path
+		}
+	}
 	if c.logFile == nil {
 		return
 	}
