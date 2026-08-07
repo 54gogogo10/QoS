@@ -113,3 +113,26 @@ func TestNewCleansUpOnPartialFailure(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 }
+
+// TestSetRatesChangesPacing 验证动态调速：SetRates 后批间隔必须缩短，且长度不符报错。
+func TestSetRatesChangesPacing(t *testing.T) {
+	cfg := &config.Config{Flows: []config.Flow{{Name: "t", Protocol: "udp",
+		SrcIP: "127.0.0.1", DstIP: "127.0.0.1", SrcPort: 0, DstPort: 9, DSCP: 0,
+		RateMbps: 0, RatePPS: 100, IPLen: 92}}}
+	s, err := New(cfg, stats.NewAggregator(1, 10))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	before := s.flows[0].batchGapNs.Load()
+	if err := s.SetRates([]RateSpec{{RateMbps: 0, RatePPS: 1000}}); err != nil {
+		t.Fatal(err)
+	}
+	after := s.flows[0].batchGapNs.Load()
+	if after >= before || after <= 0 {
+		t.Fatalf("SetRates 后 batchGap = %d, want < %d", after, before)
+	}
+	if err := s.SetRates([]RateSpec{}); err == nil {
+		t.Fatal("长度不符应报错")
+	}
+}

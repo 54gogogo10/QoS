@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -83,9 +84,13 @@ type flow struct {
 	agg          *stats.Aggregator
 	wireOverhead int
 	packetIPSize int // IP 层包长（计入字节速率）
-	interval     time.Duration
-	batch        int           // 每批包数（interval < batchTarget 时 >1）
-	batchGap     time.Duration // 批间隔 = interval * batch
+
+	cfgCfg     config.Flow   // 速率配置副本（SetRates 动态调速时更新）
+	interval   time.Duration // 包间隔（仅计算用，运行读原子值）
+	batch      int           // 每批包数（interval < batchTarget 时 >1）
+	batchGap   time.Duration // 批间隔 = interval * batch
+	batchGapNs atomic.Int64  // 批间隔 ns（run 循环逐批读取，SetRates 原子更新）
+	batchN     atomic.Int32  // 批大小（同上）
 }
 
 func newFlow(idx int, cfg config.Flow, agg *stats.Aggregator) (*flow, error) {
@@ -113,9 +118,30 @@ func newFlow(idx int, cfg config.Flow, agg *stats.Aggregator) (*flow, error) {
 		agg:          agg,
 		wireOverhead: wireOverhead,
 		packetIPSize: cfg.IPLen,
+		cfgCfg:       cfg,
 	}
 	f.computePacing(cfg)
 	return f, nil
+}
+
+// RateSpec 是单条流的速率参数（SetRates 用）。
+type RateSpec struct {
+	RateMbps float64
+	RatePPS  float64
+}
+
+// SetRates 批量更新每流速率并重算 pacing（阶梯扫描用）。
+// seq 与 socket 不中断；len(rates) 必须等于流数。
+func (s *Sender) SetRates(rates []RateSpec) error {
+	if len(rates) != len(s.flows) {
+		return fmt.Errorf("速率数量 %d 与流数 %d 不符", len(rates), len(s.flows))
+	}
+	for i, f := range s.flows {
+		f.cfgCfg.RateMbps = rates[i].RateMbps
+		f.cfgCfg.RatePPS = rates[i].RatePPS
+		f.computePacing(f.cfgCfg)
+	}
+	return nil
 }
 
 // computePacing 根据双速率参数计算包间隔：
@@ -144,6 +170,9 @@ func (f *flow) computePacing(cfg config.Flow) {
 		}
 	}
 	f.batchGap = f.interval * time.Duration(f.batch)
+	// 运行循环读取原子副本（SetRates 可并发更新 pacing）
+	f.batchGapNs.Store(int64(f.batchGap))
+	f.batchN.Store(int32(f.batch))
 }
 
 // run 包级精确调度：按绝对时刻逐包（或小批量）发送，杜绝累积漂移。
@@ -151,11 +180,11 @@ func (f *flow) run(ctx context.Context) {
 	defer f.conn.Close()
 	next := time.Now()
 	for {
-		next = next.Add(f.batchGap)
+		next = next.Add(time.Duration(f.batchGapNs.Load()))
 		if !waitUntil(ctx, next) {
 			return
 		}
-		for i := 0; i < f.batch; i++ {
+		for i := 0; i < int(f.batchN.Load()); i++ {
 			f.seq++
 			protocol.EncodeSeqTs(f.payload, f.seq, time.Now().UnixNano())
 			if _, err := f.conn.Write(f.payload); err != nil {
