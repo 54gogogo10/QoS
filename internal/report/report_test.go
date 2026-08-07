@@ -131,3 +131,37 @@ func TestSummaryNoTailDiffWithRemote(t *testing.T) {
 		t.Fatalf("recv 远端 TX 模式丢包应为 0（尾部差不计入）:\n%s", out)
 	}
 }
+
+func TestTableDelayColumns(t *testing.T) {
+	snap := testSnap(1.25e6, 1.25e6, 1000, 900, 100)
+	snap[0].DelayValid = true
+	snap[0].DelayAvgMs, snap[0].DelayMinMs, snap[0].DelayMaxMs = 1.25, 0.8, 3.1
+	snap[0].JitterMs = 0.42
+	out := Table(testCfg(), snap, true, true)
+	for _, want := range []string{"时延ms", "抖动ms", "1.2/0.8/3.1", "0.42"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("表格缺少 %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestTableDelayNoData(t *testing.T) {
+	snap := testSnap(1.25e6, 1.25e6, 1000, 900, 100) // DelayValid=false（旧发送端）
+	out := Table(testCfg(), snap, true, true)
+	if !strings.Contains(out, "—") {
+		t.Fatalf("无时延数据应显示 —:\n%s", out)
+	}
+}
+
+func TestSummaryDelayColumn(t *testing.T) {
+	snap := testSnap(1.25e6, 1.25e6, 1000, 900, 100)
+	snap[0].DelayValid = true
+	snap[0].DelayTotAvgMs, snap[0].DelayMinMs, snap[0].DelayMaxMs = 1.25, 0.8, 3.1
+	snap[0].JitterMs = 0.42
+	out := Summary(testCfg(), snap, 1_000_000, 900_000, 100, true)
+	for _, want := range []string{"时延", "1.2/0.8/3.1", "0.42"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("汇总缺少 %q:\n%s", want, out)
+		}
+	}
+}

@@ -16,11 +16,19 @@ func dscpStr(d config.DSCP) string {
 	return fmt.Sprintf("%d", d)
 }
 
+// delayCell 渲染时延列：avg/min/max ms；无数据（旧发送端）显示 —。
+func delayCell(s stats.FlowSnapshot) string {
+	if !s.DelayValid {
+		return "—"
+	}
+	return fmt.Sprintf("%.1f/%.1f/%.1f", s.DelayAvgMs, s.DelayMinMs, s.DelayMaxMs)
+}
+
 // Table 渲染实时统计表格（纯文本，终端重绘时由调用方清屏）。
 func Table(cfg *config.Config, snap []stats.FlowSnapshot, haveSender, haveCapture bool) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("%-14s %-8s %-40s %10s %10s %10s %10s %8s\n",
-		"流", "DSCP", "5元组", "TX Mbps", "TX pps", "RX Mbps", "RX pps", "丢包%"))
+	b.WriteString(fmt.Sprintf("%-14s %-8s %-40s %10s %10s %10s %10s %8s %14s %8s\n",
+		"流", "DSCP", "5元组", "TX Mbps", "TX pps", "RX Mbps", "RX pps", "丢包%", "时延ms", "抖动ms"))
 	for i, f := range cfg.Flows {
 		s := snap[i]
 		five := fmt.Sprintf("%s:%d->%s:%d", f.SrcIP, f.SrcPort, f.DstIP, f.DstPort)
@@ -39,8 +47,13 @@ func Table(cfg *config.Config, snap []stats.FlowSnapshot, haveSender, haveCaptur
 				loss = fmt.Sprintf("%.2f%%", s.LossRate*100)
 			}
 		}
-		b.WriteString(fmt.Sprintf("%-14s %-8s %-40s %10s %10s %10s %10s %8s\n",
-			f.Name, dscpStr(f.DSCP), five, txMbps, txPps, rxMbps, rxPps, loss))
+		delay, jitter := "—", "—"
+		if haveCapture && s.DelayValid {
+			delay = delayCell(s)
+			jitter = fmt.Sprintf("%.2f", s.JitterMs)
+		}
+		b.WriteString(fmt.Sprintf("%-14s %-8s %-40s %10s %10s %10s %10s %8s %14s %8s\n",
+			f.Name, dscpStr(f.DSCP), five, txMbps, txPps, rxMbps, rxPps, loss, delay, jitter))
 	}
 	return b.String()
 }
@@ -61,8 +74,8 @@ func tailDiff(s stats.FlowSnapshot) uint64 {
 func Summary(cfg *config.Config, snap []stats.FlowSnapshot, txTotal, rxTotal, lost uint64, withTailDiff bool) string {
 	var b strings.Builder
 	b.WriteString("========== 汇总报告 ==========\n")
-	b.WriteString(fmt.Sprintf("%-14s %-8s %14s %14s %14s %14s %10s\n",
-		"流", "DSCP", "TX 包", "TX 字节", "RX 包", "RX 字节", "丢包*"))
+	b.WriteString(fmt.Sprintf("%-14s %-8s %14s %14s %14s %14s %10s %16s %8s\n",
+		"流", "DSCP", "TX 包", "TX 字节", "RX 包", "RX 字节", "丢包*", "时延ms(avg/m/m)", "抖动ms"))
 	var totalLost uint64
 	for i, f := range cfg.Flows {
 		s := snap[i]
@@ -71,8 +84,13 @@ func Summary(cfg *config.Config, snap []stats.FlowSnapshot, txTotal, rxTotal, lo
 			l += tailDiff(s)
 		}
 		totalLost += l
-		b.WriteString(fmt.Sprintf("%-14s %-8s %14d %14d %14d %14d %10d\n",
-			f.Name, dscpStr(f.DSCP), s.TxPackets, s.TxBytes, s.RxPackets, s.RxBytes, l))
+		delay, jitter := "—", "—"
+		if s.DelayValid {
+			delay = fmt.Sprintf("%.1f/%.1f/%.1f", s.DelayTotAvgMs, s.DelayMinMs, s.DelayMaxMs)
+			jitter = fmt.Sprintf("%.2f", s.JitterMs)
+		}
+		b.WriteString(fmt.Sprintf("%-14s %-8s %14d %14d %14d %14d %10d %16s %8s\n",
+			f.Name, dscpStr(f.DSCP), s.TxPackets, s.TxBytes, s.RxPackets, s.RxBytes, l, delay, jitter))
 	}
 	b.WriteString(fmt.Sprintf("总发送 %d 字节, 总接收 %d 字节, 总丢失 %d 包\n", txTotal, rxTotal, totalLost))
 	b.WriteString("* 丢包 = seq 空洞丢失 + 停止瞬间未确认的尾部差（TX−RX−空洞丢失）\n")
