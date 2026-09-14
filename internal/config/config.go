@@ -146,12 +146,12 @@ func (c *Config) validate(requireRates bool) error {
 		if f.RateMbps == 0 && f.RatePPS == 0 {
 			return fmt.Errorf("flow %d (%s): rate_mbps 与 rate_pps 至少填一个", i+1, f.Name)
 		}
-		minIPLen := 38 // IPv4: 20 IP + 8 UDP + 10 协议头
+		minIPLen := 46 // IPv4: 20 IP + 8 UDP + 18 协议头（v2.7.0 起含 8 字节发送时间戳）
 		if src.To4() == nil {
-			minIPLen = 58 // IPv6: 40 + 8 + 10
+			minIPLen = 66 // IPv6: 40 + 8 + 18
 		}
 		if f.IPLen < minIPLen {
-			return fmt.Errorf("flow %d (%s): ip_len %d 小于最小值 %d（IP/UDP 头 + 10 字节协议头）", i+1, f.Name, f.IPLen, minIPLen)
+			return fmt.Errorf("flow %d (%s): ip_len %d 小于最小值 %d（IP/UDP 头 + 18 字节协议头，含发送时间戳；否则时延/抖动无法统计）", i+1, f.Name, f.IPLen, minIPLen)
 		}
 		if f.IPLen > 65535 {
 			return fmt.Errorf("flow %d (%s): ip_len %d 超过上限 65535", i+1, f.Name, f.IPLen)

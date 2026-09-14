@@ -185,3 +185,25 @@ func TestThresholdValidation(t *testing.T) {
 		t.Fatal("接收端也应拒绝非法阈值")
 	}
 }
+
+// TestMinIPLen 最小包长（v2.8.0）：18 字节协议头含发送时间戳，IPv4 最小 46、IPv6 最小 66。
+func TestMinIPLen(t *testing.T) {
+	mk := func(ip, port, ipLen string) string {
+		return "flows:\n  - name: a\n    protocol: udp\n    src_ip: " + ip + "\n    dst_ip: " + ip +
+			"\n    src_port: 1000\n    dst_port: " + port + "\n    dscp: 0\n    rate_pps: 100\n    ip_len: " + ipLen + "\n"
+	}
+	// IPv4：46 通过，45 拒绝
+	if _, err := Load(writeTemp(t, mk("127.0.0.1", "2000", "46"))); err != nil {
+		t.Fatalf("IPv4 ip_len=46 应通过: %v", err)
+	}
+	if _, err := Load(writeTemp(t, mk("127.0.0.1", "2000", "45"))); err == nil {
+		t.Fatal("IPv4 ip_len=45 应拒绝（载荷不足 18 字节协议头）")
+	}
+	// IPv6：66 通过，65 拒绝
+	if _, err := Load(writeTemp(t, mk("::1", "2000", "66"))); err != nil {
+		t.Fatalf("IPv6 ip_len=66 应通过: %v", err)
+	}
+	if _, err := Load(writeTemp(t, mk("::1", "2000", "65"))); err == nil {
+		t.Fatal("IPv6 ip_len=65 应拒绝")
+	}
+}

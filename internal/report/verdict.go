@@ -19,9 +19,13 @@ type Verdict struct {
 // final=true 为最终判定（报告/汇总）：时延用全程累计平均，丢包与汇总口径一致（seq 空洞 + 尾部差）；
 // final=false 为实时判定（Web）：时延用 100ms 窗口平均，丢包仅 seq 空洞（避免测试启动瞬间误报）。
 // 无阈值配置的流 Checked=false；无数据时对应项不判定（最终判定下"只发不收"视为 100% 丢包）。
+// snap 比 cfg.Flows 短时（配置更新与聚合器替换之间的短暂窗口）多出的流不判定，不越界。
 func Verdicts(cfg *config.Config, snap []stats.FlowSnapshot, final bool) []Verdict {
 	out := make([]Verdict, len(cfg.Flows))
 	for i, f := range cfg.Flows {
+		if i >= len(snap) {
+			continue // 聚合器仍是上一轮流数较少的运行：该流暂无数据
+		}
 		s := snap[i]
 		v := Verdict{FlowIdx: i, Pass: true}
 		if f.MaxLossRatePct > 0 && (s.RxPackets > 0 || s.Lost > 0 || (final && s.TxPackets > 0)) {

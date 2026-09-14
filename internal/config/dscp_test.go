@@ -106,3 +106,22 @@ func TestDSCPMarshalYAML(t *testing.T) {
 		t.Fatalf("1 应序列化为数字, got %v", v2)
 	}
 }
+
+// TestDSCPParseNameCaseInsensitive 回归：YAML 名字与 Web/API 输入同规则（大小写不敏感）。
+func TestDSCPParseNameCaseInsensitive(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"ef", 46}, {"af41", 34}, {"cs7", 56}, {"be", 0},
+	}
+	for _, c := range cases {
+		var d DSCP
+		if err := d.UnmarshalYAML(yamlNode(c.in, "!!str")); err != nil {
+			t.Fatalf("%s: %v", c.in, err)
+		}
+		if int(d) != c.want {
+			t.Fatalf("%s = %d, want %d", c.in, d, c.want)
+		}
+	}
+}

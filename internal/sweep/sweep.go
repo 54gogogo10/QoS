@@ -4,6 +4,7 @@ package sweep
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -46,6 +47,16 @@ func ScaleRates(base []config.Flow, factor float64) []sender.RateSpec {
 	return out
 }
 
+// LimitRates 返回极限档（factor 倍率）每流的 Mbps 速率（纯 pps 流为 0，
+// 其极限速率由调用方按 RatePPS×factor 换算）。
+func LimitRates(base []config.Flow, factor float64) []float64 {
+	out := make([]float64, len(base))
+	for i, f := range base {
+		out[i] = f.RateMbps * factor
+	}
+	return out
+}
+
 // PickLossThresholds 逐流取阈值：配置了 max_loss_rate_pct 用配置值，否则用全局默认。
 func PickLossThresholds(cfg *config.Config, def float64) []float64 {
 	th := make([]float64, len(cfg.Flows))
@@ -57,6 +68,80 @@ func PickLossThresholds(cfg *config.Config, def float64) []float64 {
 		}
 	}
 	return th
+}
+
+// ---------- --json 机器可读汇总（v2.9.0） ----------
+
+type jsonStepOut struct {
+	Scale   float64   `json:"scale"`    // 相对 base 的倍率
+	LossPct []float64 `json:"loss_pct"` // 每流窗口丢包率 %（-1=窗口无数据）
+	Over    bool      `json:"over"`     // 任一流超阈值
+}
+
+type jsonFlowOut struct {
+	Idx       int     `json:"idx"`
+	Name      string  `json:"name"`
+	BaseMbps  float64 `json:"base_mbps"`            // 配置的起始速率（纯 pps 流为 0）
+	BasePPS   float64 `json:"base_pps"`             // 配置的起始 pps（纯带宽流为 0）
+	LimitMbps float64 `json:"limit_mbps"`           // 极限速率（LimitScale 倍；起始档越限时为 0）
+	LimitPPS  float64 `json:"limit_pps"`            // 极限 pps（同上）
+	Threshold float64 `json:"loss_threshold_pct"`   // 该流生效的丢包阈值 %
+}
+
+type jsonOut struct {
+	Version      string        `json:"version"`
+	StepPct      float64       `json:"step_pct"`
+	HoldS        int           `json:"hold_s"`
+	MaxScale     float64       `json:"max_scale"`
+	LimitScale   float64       `json:"limit_scale"` // 最后一档全部 PASS 的倍率（0=起始档即越限）
+	DoneReason   string        `json:"done_reason"`
+	Verdict      string        `json:"verdict"` // pass=找到极限或全档通过, fail=起始档即越限
+	Flows        []jsonFlowOut `json:"flows"`
+	Steps        []jsonStepOut `json:"steps"`
+	CSVReport    string        `json:"csv_report,omitempty"` // 明细 CSV 路径（由调用方填）
+}
+
+// JSONSummary 渲染扫描结果的机器可读 JSON（sweep --json 模式，v2.9.0）。
+// verdict 与退出码契约一致：limit_scale<=0（起始档即越限）为 fail，否则 pass。
+// csvPath 为明细 CSV 路径（可为空）。
+func JSONSummary(cfg *config.Config, res *Result, opts Options, version, csvPath string) ([]byte, error) {
+	thresholds := PickLossThresholds(cfg, opts.LossThresholdPct)
+	// 默认值钳制与 Run 一致（Hold <2s 视为未设置 → 10s），保证 JSON 报告
+	// 的 hold_s 与实际执行参数相符
+	hold := opts.Hold
+	if hold < 2*time.Second {
+		hold = 10 * time.Second
+	}
+	stepPct := opts.StepPct
+	if stepPct <= 0 {
+		stepPct = 20
+	}
+	maxScale := opts.MaxScale
+	if maxScale <= 1 {
+		maxScale = 10
+	}
+	out := jsonOut{
+		Version: version, StepPct: stepPct, HoldS: int(hold.Seconds()), MaxScale: maxScale,
+		LimitScale: res.LimitScale, DoneReason: res.DoneReason, Verdict: "pass", CSVReport: csvPath,
+	}
+	if res.LimitScale <= 0 {
+		out.Verdict = "fail"
+	}
+	for i, f := range cfg.Flows {
+		th := opts.LossThresholdPct
+		if i < len(thresholds) {
+			th = thresholds[i]
+		}
+		out.Flows = append(out.Flows, jsonFlowOut{
+			Idx: i, Name: f.Name, BaseMbps: f.RateMbps, BasePPS: f.RatePPS,
+			LimitMbps: f.RateMbps * res.LimitScale, LimitPPS: f.RatePPS * res.LimitScale,
+			Threshold: th,
+		})
+	}
+	for _, st := range res.Steps {
+		out.Steps = append(out.Steps, jsonStepOut{Scale: st.Scale, LossPct: st.LossPct, Over: st.Over})
+	}
+	return json.MarshalIndent(out, "", "  ")
 }
 
 type stepAction int
@@ -74,7 +159,6 @@ type stepMachine struct {
 	thresholds   []float64
 	nextScale    float64 // 下一档倍率
 	limitScale   float64 // 最后一档全 PASS 的倍率
-	limitMbps    []float64
 	pendingScale float64 // 待确认的越限档（0=无）
 	doneReason   string
 }
@@ -108,8 +192,6 @@ func (m *stepMachine) next(scale float64, losses []float64) stepAction {
 		// 抖动误判恢复：继续
 	}
 	m.limitScale = scale // 该档全 PASS，暂记极限
-	m.limitMbps = make([]float64, len(losses))
-	_ = losses
 	ns := scale * (1 + m.stepPct/100)
 	if ns > m.maxScale {
 		m.doneReason = "已达到最大倍率且全部通过"
@@ -221,7 +303,7 @@ func scan(ctx context.Context, cfg *config.Config, opts Options, s *sender.Sende
 		switch m.next(scale, losses) {
 		case actStop:
 			res.LimitScale = m.limitScale
-			res.LimitMbps = m.limitMbps
+			res.LimitMbps = LimitRates(cfg.Flows, m.limitScale)
 			res.DoneReason = m.doneReason
 			return res, nil
 		case actConfirm:

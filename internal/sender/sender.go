@@ -72,6 +72,9 @@ func (s *Sender) Run(ctx context.Context) {
 // Close 关闭全部流的 UDP socket（用于启动失败时的清理）。
 func (s *Sender) Close() {
 	for _, f := range s.flows {
+		if f.qos != nil {
+			f.qos.close() // Windows QoS2 流（其他平台 nil）
+		}
 		f.conn.Close()
 	}
 }
@@ -84,6 +87,8 @@ type flow struct {
 	agg          *stats.Aggregator
 	wireOverhead int
 	packetIPSize int // IP 层包长（计入字节速率）
+
+	qos *qosFlow // Windows QoS2 打标流句柄（其他平台 nil）
 
 	cfgCfg     config.Flow   // 速率配置副本（SetRates 动态调速时更新）
 	interval   time.Duration // 包间隔（仅计算用，运行读原子值）
@@ -100,7 +105,8 @@ func newFlow(idx int, cfg config.Flow, agg *stats.Aggregator) (*flow, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := setDSCP(conn, int(cfg.DSCP)); err != nil {
+	qos, err := setDSCP(conn, int(cfg.DSCP))
+	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("设置 DSCP=%d 失败: %w", cfg.DSCP, err)
 	}
@@ -118,6 +124,7 @@ func newFlow(idx int, cfg config.Flow, agg *stats.Aggregator) (*flow, error) {
 		agg:          agg,
 		wireOverhead: wireOverhead,
 		packetIPSize: cfg.IPLen,
+		qos:          qos,
 		cfgCfg:       cfg,
 	}
 	f.computePacing(cfg)

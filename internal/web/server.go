@@ -10,8 +10,10 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"qostool/internal/config"
@@ -36,9 +38,13 @@ type Server struct {
 
 	lastIface string // 最近一次监听接口（接收端被远端通知启动时使用）
 
+	clockEst *ClockEstimator // 控制通道时钟偏差估计（v2.8.1，接收端角色）
+
 	receiversMu sync.Mutex
 	receivers   map[string]*receiverInfo // 已连接接收端（key=ip:port）
-	port        string                   // 本端 web 端口（接收端注册时上报）
+	port        atomic.Value             // 本端 web 端口（string；接收端注册时上报，v2.8.1 改 atomic 防竞态）
+
+	lastStartReceivers []string // 发送端本次启动勾选的接收端（停止时同步通知，v2.8.1）
 
 }
 
@@ -59,6 +65,13 @@ type remoteSnapshot struct {
 	TxPps   []float64 `json:"tx_pps"`
 	TxPkts  []uint64  `json:"tx_packets"`
 	TxBytes []uint64  `json:"tx_bytes"`
+
+	// v2.8.1 控制通道时钟偏差（发送端−接收端时钟，ns/ms；0 表示尚无样本）。
+	// 不加 omitempty：偏差恰为 0.0（如共用宿主时钟的虚机）时省略字段会让
+	// 前端 remote.clock_offset_ms.toFixed() 抛 TypeError（v2.9.0 审计修复）
+	ClockOffsetMs float64 `json:"clock_offset_ms"`
+	ClockRTTMs    float64 `json:"clock_rtt_ms"`
+	ClockSamples  int     `json:"clock_samples,omitempty"`
 }
 
 // New 创建 Web 服务：send/recv/bidir 三个独立实例与独立配置文件。
@@ -68,6 +81,7 @@ func New(ctrls map[controller.Mode]*controller.Controller, cfgPaths map[controll
 		cfgPaths:      cfgPaths,
 		remoteControl: remoteControl,
 		receivers:     map[string]*receiverInfo{},
+		clockEst:      NewClockEstimator(32),
 	}
 }
 
@@ -108,6 +122,7 @@ func (s *Server) ListenAndServe(addr string) error {
 	mux.HandleFunc("/api/receivers", s.handleReceivers)
 	mux.HandleFunc("/api/iface", s.handleIfaceSel)
 	mux.HandleFunc("/api/tx_stats", s.handleTxStats)
+	mux.HandleFunc("/api/time", s.handleTime)
 	mux.HandleFunc("/api/report", s.handleReport)
 	mux.HandleFunc("/", s.handleIndex)
 	s.srv = &http.Server{
@@ -119,9 +134,9 @@ func (s *Server) ListenAndServe(addr string) error {
 		IdleTimeout:       60 * time.Second,
 	}
 	if _, p, err := net.SplitHostPort(addr); err == nil {
-		s.port = p
+		s.port.Store(p)
 	} else {
-		s.port = "16666"
+		s.port.Store("16666")
 	}
 	return s.srv.ListenAndServe()
 }
@@ -178,6 +193,7 @@ type apiFlow struct {
 	RxBytes   uint64  `json:"rx_bytes"`
 	Lost      uint64  `json:"lost"`
 	LossRate  float64 `json:"loss_rate"`
+	Reordered uint64  `json:"reordered"` // 乱序到达包数（v2.9.0，不含孔内重复包）
 
 	// v2.7.0：时延/抖动与阈值判定（delay_valid=false 表示发送端无时间戳）
 	DelayValid   bool    `json:"delay_valid"`
@@ -186,6 +202,9 @@ type apiFlow struct {
 	DelayMinMs   float64 `json:"delay_min_ms"`
 	DelayMaxMs   float64 `json:"delay_max_ms"`
 	JitterMs     float64 `json:"jitter_ms"`
+	DelayP95Ms   float64 `json:"delay_p95_ms"` // v2.8.0 全程 p95（毫秒）
+	DelayP99Ms   float64 `json:"delay_p99_ms"` // v2.8.0 全程 p99（毫秒）
+	ClockOffsetMs float64 `json:"clock_offset_ms"` // v2.8.1 时钟偏差估计（毫秒，min raw 差值）
 	Verdict      string  `json:"verdict"` // "pass"/"fail"/""（未配置阈值）
 }
 
@@ -314,8 +333,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		out.Flows = make([]apiFlow, len(snap))
 		out.History = apiHistory{T: hist.T, Tx: hist.TxB, Rx: hist.RxB, Dly: hist.Dly}
 		// v2.7.0：阈值判定用窗口时延（实时响应），未配置阈值的流 verdict=""
+		// snap 与 cfg.Flows 流数不一致（配置更新/重启窗口聚合器还是上一轮的）时跳过多出的流
 		vs := report.Verdicts(cfg, snap, false)
 		for i, f := range cfg.Flows {
+			if i >= len(snap) {
+				break
+			}
 			sf := snap[i]
 			v := ""
 			if vs[i].Checked {
@@ -331,9 +354,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 				TxBps: sf.TxBps, TxPps: sf.TxPps, RxBps: sf.RxBps, RxPps: sf.RxPps,
 				TxPackets: sf.TxPackets, TxBytes: sf.TxBytes,
 				RxPackets: sf.RxPackets, RxBytes: sf.RxBytes,
-				Lost: sf.Lost, LossRate: sf.LossRate,
+				Lost: sf.Lost, LossRate: sf.LossRate, Reordered: sf.Reordered,
 				DelayValid: sf.DelayValid, DelayAvgMs: sf.DelayAvgMs, DelayTotAvgMs: sf.DelayTotAvgMs,
 				DelayMinMs: sf.DelayMinMs, DelayMaxMs: sf.DelayMaxMs, JitterMs: sf.JitterMs,
+				DelayP95Ms: sf.DelayP95Ms, DelayP99Ms: sf.DelayP99Ms,
+				ClockOffsetMs: sf.ClockOffsetMs,
 				Verdict: v,
 			}
 		}
@@ -456,18 +481,23 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		Iface     string   `json:"iface"`
 		Mode      string   `json:"mode"`
 		Receivers []string `json:"receivers"` // 勾选的接收端地址（发送端推送监听命令）
+		Remote    bool     `json:"remote"`    // 机器间同步通知（v2.8.1）：绕过页面只读限制
 	}
 	if !decodeJSON(w, r, &in) {
 		return
 	}
 	m := modeFromString(in.Mode)
 	ctrl := s.ctrl(m)
+	// 机器间同步通知（发送端推送）不受 CLI 页面只读限制；页面手动操作仍需控制权
+	if !in.Remote && !s.requireControl(w, r) {
+		return
+	}
+	s.receiversMu.Lock()
 	log.Printf("[web] handleStart mode=%s iface=%q lastIface=%q", in.Mode, in.Iface, s.lastIface)
 	if in.Iface != "" {
-		s.receiversMu.Lock()
 		s.lastIface = in.Iface // 记住监听接口（被远端通知启动时使用）
-		s.receiversMu.Unlock()
 	}
+	s.receiversMu.Unlock()
 	if in.Iface == "" && m != controller.ModeSend {
 		// 接收端被发送端通知启动：用上次的监听接口
 		s.receiversMu.Lock()
@@ -492,6 +522,10 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	notifyMsgs := []string{}
 	if m == controller.ModeSend {
+		// 记录本次启动勾选的接收端：停止时同步通知它们停止监听
+		s.receiversMu.Lock()
+		s.lastStartReceivers = append([]string(nil), in.Receivers...)
+		s.receiversMu.Unlock()
 		// 推送监听命令到勾选的接收端
 		for _, addr := range in.Receivers {
 			if msg := NotifyPeerListen(addr); msg != "" {
@@ -499,6 +533,13 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		time.Sleep(2 * time.Second) // 等待接收端监听就绪，避免丢包
+	}
+	// v2.8.1：控制通道时钟偏差注入时延校正基准（接收端/双向角色）。
+	// Estimate 返回"发送端−接收端"时钟差，hint 基准为"接收端−发送端"，取负注入
+	if m != controller.ModeSend {
+		if offNs, _, ok := s.clockEst.Estimate(); ok {
+			ctrl.SetClockOffsetHint(-offNs)
+		}
 	}
 	if err := ctrl.Start(in.Iface); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
@@ -521,25 +562,131 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.requireControl(w, r) {
-		return
-	}
 	var in struct {
-		Mode string `json:"mode"`
+		Mode   string `json:"mode"`
+		Remote bool   `json:"remote"` // 接收端被发送端同步通知停止（v2.8.1）：延迟排空在途包
 	}
 	if !decodeJSON(w, r, &in) {
 		return
 	}
+	m := modeFromString(in.Mode)
+	ctrl := s.ctrl(m)
+	// 机器间同步通知（发送端推送）不受 CLI 页面只读限制；页面手动操作仍需控制权
+	if !in.Remote && !s.requireControl(w, r) {
+		return
+	}
+
+	// 发送端角色：停止本端后同步通知本次勾选的接收端停止监听
+	if m == controller.ModeSend {
+		s.receiversMu.Lock()
+		receivers := append([]string(nil), s.lastStartReceivers...)
+		s.receiversMu.Unlock()
+		ctrl.Stop()
+		// 并行通知：每个失联接收端要等满 3s 超时，串行多个会把 handler
+		// 总时长拖过 http.Server 的 WriteTimeout（响应写不出去）
+		var nwg sync.WaitGroup
+		for _, addr := range receivers {
+			nwg.Add(1)
+			go func(addr string) {
+				defer nwg.Done()
+				if msg := NotifyPeerStop(addr); msg != "" {
+					log.Printf("[web] 通知接收端 %s 停止失败: %s", addr, msg)
+				}
+			}(addr)
+		}
+		nwg.Wait()
+		writeJSON(w, struct {
+			OK      bool   `json:"ok"`
+			Message string `json:"message"`
+		}{OK: true, Message: fmt.Sprintf("已停止（已同步 %d 个接收端停止）", len(receivers))})
+		return
+	}
+
+	if in.Remote {
+		// 接收端被发送端同步通知：延迟排空在途包后再停（期间用户手动重启则不动作）
+		st := ctrl.Status()
+		go func() {
+			time.Sleep(remoteStopDelay)
+			if cur := ctrl.Status(); cur.Running && cur.Started.Equal(st.Started) {
+				ctrl.Stop()
+			}
+		}()
+		writeJSON(w, struct {
+			OK      bool   `json:"ok"`
+			Message string `json:"message"`
+		}{OK: true, Message: fmt.Sprintf("已收到发送端停止通知，%.0fs 后停止监听", remoteStopDelay.Seconds())})
+		return
+	}
 	log.Printf("[web] handleStop mode=%s", in.Mode)
-	s.ctrl(modeFromString(in.Mode)).Stop()
+	ctrl.Stop()
 	writeJSON(w, struct {
 		OK      bool   `json:"ok"`
 		Message string `json:"message"`
 	}{OK: true, Message: "已停止"})
 }
 
+// remoteStopDelay 接收端被发送端同步停止时的延迟：发送端已停止，
+// 等待网络中的在途包到达并被接收端捕获后再停，避免尾部差虚假丢包。
+const remoteStopDelay = 1 * time.Second
+
+// validPeerAddr 校验对端地址必须是 host:port 且端口为 1-65535 数字：
+// 该地址会被拼进 http://<addr>/api/... 发起请求，拒绝任意字符串（含路径/协议注入）。
+func validPeerAddr(addr string) bool {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || host == "" || port == "" {
+		return false
+	}
+	n, err := strconv.Atoi(port)
+	return err == nil && n >= 1 && n <= 65535
+}
+
+// NotifyPeerStop 通知远端接收端停止监听（发送端停止时同步，v2.8.1）。
+// 返回错误信息（空串=成功或未设置地址）；失败不阻塞，但调用方可在日志中提示。
+func NotifyPeerStop(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	if !validPeerAddr(addr) {
+		return "接收端地址非法: " + addr
+	}
+	body := strings.NewReader(`{"mode":"recv","remote":true}`)
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Post("http://"+addr+"/api/stop", "application/json", body)
+	if err != nil {
+		return "无法连接接收端 " + addr + ": " + err.Error()
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+		return "接收端拒绝: " + string(b)
+	}
+	return ""
+}
+
+// NotifyAllReceiversStop 通知所有在线接收端停止监听（CLI 发送端退出时用，v2.8.1）。
+func (s *Server) NotifyAllReceiversStop() {
+	s.receiversMu.Lock()
+	addrs := make([]string, 0, len(s.receivers))
+	now := time.Now()
+	for _, ri := range s.receivers {
+		if now.Sub(ri.LastSeen) < 5*time.Second {
+			addrs = append(addrs, ri.Addr)
+		}
+	}
+	s.receiversMu.Unlock()
+	for _, addr := range addrs {
+		if msg := NotifyPeerStop(addr); msg != "" {
+			log.Printf("[web] 通知接收端 %s 停止失败: %s", addr, msg)
+		}
+	}
+}
+
 // handleMode 切换角色：send（只发送）/ recv（只监听）/ bidir（双向）。
 func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
 	writeJSON(w, struct {
 		OK      bool     `json:"ok"`
 		Message string   `json:"message"`
@@ -592,7 +739,12 @@ func (s *Server) handleReceivers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// maxReceivers 接收端注册表容量上限：防恶意/异常请求以不同 port 参数
+// 无限灌注册条目（内存增长）。超过时先清过期项，仍满则淘汰最久未见的。
+const maxReceivers = 128
+
 // recordReceiver 从接收端的拉取请求中登记其地址（接收端自动注册机制）。
+// port 参数必须是 1-65535 的数字（防伪造），注册表容量有上限（防灌爆）。
 func (s *Server) recordReceiver(r *http.Request) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -602,16 +754,40 @@ func (s *Server) recordReceiver(r *http.Request) {
 	if port == "" {
 		port = "16666"
 	}
+	// 校验端口：拒绝任意字符串拼进注册表 key（配合容量上限防内存 DoS）
+	pn, err := strconv.Atoi(port)
+	if err != nil || pn < 1 || pn > 65535 {
+		return
+	}
 	key := net.JoinHostPort(host, port)
 	s.receiversMu.Lock()
-	ri := s.receivers[key]
-	if ri == nil {
-		ri = &receiverInfo{Addr: key}
-		s.receivers[key] = ri
+	defer s.receiversMu.Unlock()
+	now := time.Now()
+	if ri := s.receivers[key]; ri != nil {
+		ri.Online, ri.LastSeen = true, now
+		return
 	}
-	ri.Online = true
-	ri.LastSeen = time.Now()
-	s.receiversMu.Unlock()
+	if len(s.receivers) >= maxReceivers {
+		// 先清超过 5s 未活跃的过期项；仍满则淘汰最久未见的
+		for k, ri := range s.receivers {
+			if now.Sub(ri.LastSeen) >= 5*time.Second {
+				delete(s.receivers, k)
+			}
+		}
+		if len(s.receivers) >= maxReceivers {
+			var oldestKey string
+			var oldest time.Time
+			for k, ri := range s.receivers {
+				if oldestKey == "" || ri.LastSeen.Before(oldest) {
+					oldestKey, oldest = k, ri.LastSeen
+				}
+			}
+			if oldestKey != "" {
+				delete(s.receivers, oldestKey)
+			}
+		}
+	}
+	s.receivers[key] = &receiverInfo{Addr: key, Online: true, LastSeen: now}
 }
 
 // RemoteTXProvider 返回当前同步到的远端发送端 TX 数据（recv 模式日志/汇总用）。
@@ -649,7 +825,10 @@ func NotifyPeerListen(addr string) string {
 	if addr == "" {
 		return ""
 	}
-	body := strings.NewReader(`{"mode":"recv"}`)
+	if !validPeerAddr(addr) {
+		return "接收端地址非法: " + addr
+	}
+	body := strings.NewReader(`{"mode":"recv","remote":true}`)
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Post("http://"+addr+"/api/start", "application/json", body)
 	if err != nil {
@@ -663,6 +842,34 @@ func NotifyPeerListen(addr string) string {
 	return ""
 }
 
+// ClockOffsetNs 返回控制通道时钟偏差估计（发送端−接收端时钟，发送端快为正，ns）
+// 与最优样本 RTT（ns）。
+// ok=false 表示样本不足（发送端离线或尚未完成首轮测量）。
+func (s *Server) ClockOffsetNs() (offsetNs, rttNs int64, ok bool) {
+	return s.clockEst.Estimate()
+}
+
+// ClockSamples 返回控制通道时钟测量样本数。
+func (s *Server) ClockSamples() int {
+	return s.clockEst.Samples()
+}
+
+// handleTime 供远端接收端做 NTP 风格四时间戳时钟测量（v2.8.1）：
+// 返回本端处理时刻（等价 NTP t2≈t3）。带 port 参数的调用同时完成接收端自动注册
+// （与 tx_stats 一致）；无 port 的普通探测不注册，避免污染接收端列表。
+func (s *Server) handleTime(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if r.URL.Query().Get("port") != "" {
+		s.recordReceiver(r)
+	}
+	writeJSON(w, struct {
+		ServerTimeNs int64 `json:"server_time_ns"`
+	}{ServerTimeNs: time.Now().UnixNano()})
+}
+
 // handleReport 按当前（或上次）统计立即生成 HTML 报告（导出按钮）。
 func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -670,6 +877,11 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.requireControl(w, r) {
+		return
+	}
+	// 与其他控制端点一致：校验 Content-Type（防跨站表单 CSRF 刷报告文件）+ 1MB 上限
+	var in struct{}
+	if !decodeJSON(w, r, &in) {
 		return
 	}
 	m := modeFromQuery(r)
@@ -704,6 +916,11 @@ func (s *Server) handleRemote(w http.ResponseWriter, r *http.Request) {
 	if in.Addr != "" && !strings.Contains(in.Addr, ":") {
 		in.Addr += ":16666" // 默认端口
 	}
+	// 与机器间通知同规格的地址校验：只允许 host:port（防任意字符串拼进请求 URL）
+	if in.Addr != "" && !validPeerAddr(in.Addr) {
+		writeJSONError(w, http.StatusBadRequest, "地址必须是 host:port 形式（如 192.168.1.10:16666），当前 "+in.Addr)
+		return
+	}
 	s.remoteMu.Lock()
 	s.remoteAddr = in.Addr
 	s.remoteData = nil
@@ -717,7 +934,7 @@ func (s *Server) handleRemote(w http.ResponseWriter, r *http.Request) {
 	}{OK: true, Addr: in.Addr})
 }
 
-// remoteLoopOnce 拉取一次发送端 TX 统计（供轮询 goroutine 调用）。
+// remoteLoopOnce 拉取一次发送端 TX 统计，并做一次时钟测量（v2.8.1）。
 func (s *Server) remoteLoopOnce() {
 	s.remoteMu.Lock()
 	addr := s.remoteAddr
@@ -727,12 +944,20 @@ func (s *Server) remoteLoopOnce() {
 	}
 	s.remoteMu.Unlock()
 
+	// 时钟测量（v2.8.1）：NTP 风格四时间戳，offset = t2 − (t1+t4)/2
+	// （t3≈t2；对称路径假设下消除路径时延，误差≈路径不对称/2）
+	t1 := time.Now().UnixNano()
+	if off, err := s.queryRemoteTime(addr); err == nil {
+		t4 := time.Now().UnixNano()
+		s.clockEst.AddSample(t4-t1, off-(t1+t4)/2)
+	}
+
 	snap := &remoteSnapshot{Addr: addr}
 	client := &http.Client{Timeout: 3 * time.Second}
 	// 带上本端端口：发送端据此登记接收端地址（自动注册）
 	u := "http://" + addr + "/api/tx_stats"
-	if s.port != "" {
-		u += "?port=" + s.port
+	if p, ok := s.port.Load().(string); ok && p != "" {
+		u += "?port=" + p
 	}
 	resp, err := client.Get(u)
 	if err != nil {
@@ -757,7 +982,8 @@ func (s *Server) remoteLoopOnce() {
 			TxPkts  []uint64  `json:"tx_packets"`
 			TxBytes []uint64  `json:"tx_bytes"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&out); err == nil {
+		// 限制读取量：远端异常返回超大 body 时不占内存（正常响应远小于此）
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err == nil {
 			snap.Online = true
 			snap.Running = out.Running
 			snap.TxBps = out.TxBps
@@ -767,9 +993,45 @@ func (s *Server) remoteLoopOnce() {
 			snap.Updated = time.Now()
 		}
 	}
+	// 时钟偏差估计随 TX 快照一并返回（接收端页面显示）
+	if offNs, rttNs, ok := s.clockEst.Estimate(); ok {
+		snap.ClockOffsetMs = float64(offNs) / 1e6
+		snap.ClockRTTMs = float64(rttNs) / 1e6
+		snap.ClockSamples = s.clockEst.Samples()
+	}
 	s.remoteMu.Lock()
 	s.remoteData = snap
 	s.remoteMu.Unlock()
+}
+
+// queryRemoteTime 请求远端 /api/time 并返回其服务器时钟（ns）。
+// 带本端端口：发送端据此登记接收端地址（自动注册）。
+// 用独立 Transport（禁用 keep-alive）：Windows 上共享 DefaultTransport 的
+// 连接复用在本场景出现响应挂起（persistConn 等不到响应头），新连接更可靠。
+func (s *Server) queryRemoteTime(addr string) (int64, error) {
+	u := "http://" + addr + "/api/time"
+	if p, ok := s.port.Load().(string); ok && p != "" {
+		u += "?port=" + p
+	}
+	client := &http.Client{
+		Timeout:   3 * time.Second,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	resp, err := client.Get(u)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("status %d", resp.StatusCode)
+	}
+	var out struct {
+		ServerTimeNs int64 `json:"server_time_ns"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
+		return 0, err
+	}
+	return out.ServerTimeNs, nil
 }
 
 // startRemoteLoop 启动每秒轮询发送端统计的 goroutine（幂等）。
@@ -781,18 +1043,20 @@ func (s *Server) startRemoteLoop() {
 	}
 	s.remoteLoopRunning = true
 	go func() {
+		s.remoteLoopOnce() // 立即测一次：时钟样本不等第一个 tick（v2.8.1）
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
+			// 判定退出与清 running 必须同临界区：否则 SetRemote 在两段锁之间
+			// 看到 running=true 不再启动，而旧循环随即退出 → 轮询静默失效
 			s.remoteMu.Lock()
 			addr := s.remoteAddr
-			s.remoteMu.Unlock()
 			if addr == "" {
-				s.remoteMu.Lock()
 				s.remoteLoopRunning = false
 				s.remoteMu.Unlock()
 				return
 			}
+			s.remoteMu.Unlock()
 			s.remoteLoopOnce()
 		}
 	}()

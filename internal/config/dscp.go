@@ -46,9 +46,10 @@ func (d *DSCP) UnmarshalYAML(node *yaml.Node) error {
 		*d = DSCP(v)
 		return nil
 	case "!!str":
-		v, ok := dscpNames[node.Value]
-		if !ok {
-			return fmt.Errorf("未知 DSCP 名字 %q", node.Value)
+		// 与 Web/API 输入同规则：名字大小写不敏感，也接受数字字符串
+		v, err := ParseDSCP(node.Value)
+		if err != nil {
+			return err
 		}
 		*d = DSCP(v)
 		return nil

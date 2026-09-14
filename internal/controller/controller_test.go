@@ -163,6 +163,14 @@ func TestLogAndDataRetention(t *testing.T) {
 	if !strings.Contains(lines[0], "time") || !strings.Contains(lines[0], "tx_pps_1") {
 		t.Fatalf("CSV 表头错误: %s", lines[0])
 	}
+	// v2.9.0：CSV 应含乱序列（表头第二行为全量列，数据行列数与之相等）
+	if !strings.Contains(lines[1], "reorder_1") {
+		t.Fatalf("CSV 表头缺少乱序列: %s", lines[1])
+	}
+	if len(strings.Split(lines[1], ",")) != len(strings.Split(lines[len(lines)-1], ",")) {
+		t.Fatalf("CSV 列数不一致: 表头 %d 列，数据行 %d 列",
+			len(strings.Split(lines[1], ",")), len(strings.Split(lines[len(lines)-1], ",")))
+	}
 	// 3. 汇总 txt 存在
 	sums, _ := filepath.Glob(filepath.Join(logDir, "logs", "qostool_*_summary.txt"))
 	if len(sums) != 1 {
@@ -200,5 +208,34 @@ func TestStopGeneratesHTMLReport(t *testing.T) {
 	data, _ := os.ReadFile(c.LastReportPath())
 	if !strings.Contains(string(data), "FAIL") {
 		t.Fatal("1%% 丢包超 0.5%% 阈值应生成 FAIL 报告")
+	}
+}
+
+// TestExportReportAfterStop 回归（v2.9.0 审计修复）：停止后点"导出报告"，
+// 报告的开始时间用上一轮运行时刻，不再是零值时间（0001-01-01）与 2000 年时长。
+func TestExportReportAfterStop(t *testing.T) {
+	dir := t.TempDir()
+	c := New(cfgWithPort(12087), ModeSend)
+	c.SetLogDir(dir)
+	if err := c.Start(""); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	c.Stop()
+
+	path, err := c.WriteHTMLReport()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(data)
+	if strings.Contains(s, "0001-01-01") {
+		t.Fatalf("停止后导出报告不应出现零值时间")
+	}
+	if !strings.Contains(s, time.Now().Format("2006-01-02")) {
+		t.Fatalf("报告应使用上一轮开始时刻（今天）: %s", s[:300])
 	}
 }

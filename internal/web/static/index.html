@@ -127,8 +127,8 @@
     <thead><tr>
       <th>流</th><th>DSCP</th><th>5元组</th>
       <th id="thTxMbps">TX Mbps</th><th id="thTxPps">TX pps</th><th class="sc-rx">RX Mbps</th><th class="sc-rx">RX pps</th>
-      <th>TX 包</th><th class="sc-rxpk">RX 包</th><th class="sc-loss">丢失</th><th class="sc-loss">丢包率</th>
-      <th class="sc-dly">时延avg(ms)</th><th class="sc-dly">抖动(ms)</th><th class="sc-verdict">判定</th>
+      <th>TX 包</th><th class="sc-rxpk">RX 包</th><th class="sc-loss">丢失</th><th class="sc-loss">丢包率</th><th class="sc-loss">乱序</th>
+      <th class="sc-dly">时延avg(ms)</th><th class="sc-dly">时延p95(ms)</th><th class="sc-dly">时延p99(ms)</th><th class="sc-dly">抖动(ms)</th><th class="sc-verdict">判定</th>
     </tr></thead>
     <tbody id="statsBody"></tbody>
   </table>
@@ -534,7 +534,9 @@ async function loadStatus() {
 // doReport 导出 HTML 报告（服务端按当前统计生成）。
 async function doReport() {
   try {
-    const r = await fetch('/api/report?mode=' + currentMode, {method: 'POST'});
+    const r = await fetch('/api/report?mode=' + currentMode, {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
+    });
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || r.statusText);
     showMsg('报告已生成: ' + d.path, false);
@@ -689,12 +691,15 @@ function renderTable(flows, running, remote) {
       txPkts = fmt(f.tx_packets);
     }
     tr.innerHTML =
-      `<td>${esc(f.name)}</td><td>${f.dscp}</td><td>${f.src_ip}:${f.src_port}->${f.dst_ip}:${f.dst_port}</td>` +
+      `<td>${esc(f.name)}</td><td>${f.dscp}</td><td>${esc(f.src_ip)}:${esc(f.src_port)}->${esc(f.dst_ip)}:${esc(f.dst_port)}</td>` +
       `<td>${txMbps}</td><td>${txPps}</td>` +
       `<td class="sc-rx">${(f.rx_bps*8/1e6).toFixed(2)}</td><td class="sc-rx">${f.rx_pps.toFixed(0)}</td>` +
       `<td>${txPkts}</td><td class="sc-rxpk">${fmt(f.rx_packets)}</td>` +
       `<td class="sc-loss">${fmt(lost)}</td><td class="sc-loss">${(lossRate*100).toFixed(2)}%</td>` +
+      `<td class="sc-loss">${fmt(f.reordered)}</td>` +
       `<td class="sc-dly">${f.delay_valid ? f.delay_avg_ms.toFixed(2) : '—'}</td>` +
+      `<td class="sc-dly">${f.delay_valid ? f.delay_p95_ms.toFixed(2) : '—'}</td>` +
+      `<td class="sc-dly">${f.delay_valid ? f.delay_p99_ms.toFixed(2) : '—'}</td>` +
       `<td class="sc-dly">${f.delay_valid ? f.jitter_ms.toFixed(2) : '—'}</td>` +
       `<td class="sc-verdict verdict">${verdictBadge(f.verdict)}</td>`;
     tbody.appendChild(tr);
@@ -720,8 +725,8 @@ function applyStatsColumnVisibility() {
   sel('sc-loss', hideSend);
   sel('sc-dly', hideSend);
   sel('sc-verdict', hideSend);
-  // colgroup 同步（统计表列索引：5=RX Mbps 6=RX pps 8=RX包 9=丢失 10=丢包率 11-13=时延/抖动/判定）
-  [5, 6, 8, 9, 10, 11, 12, 13].forEach(i => {
+  // colgroup 同步（统计表列索引：5=RX Mbps 6=RX pps 8=RX包 9=丢失 10=丢包率 11=乱序 12-16=时延avg/p95/p99/抖动/判定）
+  [5, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16].forEach(i => {
     if (statsResize.cols[i]) statsResize.cols[i].style.display = hideSend ? 'none' : '';
   });
 }
@@ -758,7 +763,12 @@ function updateRemoteStatus(remote) {
     el.textContent = '未连接';
     el.style.color = '#888';
   } else if (remote.online) {
-    el.textContent = '已连接 · 更新于 ' + new Date(remote.updated).toLocaleTimeString() + (remote.running ? ' · 发送端运行中' : ' · 发送端未运行');
+    let txt = '已连接 · 更新于 ' + new Date(remote.updated).toLocaleTimeString() + (remote.running ? ' · 发送端运行中' : ' · 发送端未运行');
+    // v2.8.1 控制通道时钟偏差（NTP 风格四时间戳，与测试流同网络路径）
+    if (remote.clock_samples > 0) {
+      txt += ' · 时钟偏差(发送端−接收端) ' + remote.clock_offset_ms.toFixed(1) + ' ms（RTT ' + remote.clock_rtt_ms.toFixed(2) + ' ms，' + remote.clock_samples + ' 样本）';
+    }
+    el.textContent = txt;
     el.style.color = '#7dff7d';
   } else {
     el.textContent = '连接失败 · 发送端离线';
@@ -790,9 +800,9 @@ function showMsg(text, isErr) {
 
 // ---------- 初始化 ----------
 
-// 可拖动列宽（配置表 12 列 / 统计表 14 列），宽度记忆在 localStorage
+// 可拖动列宽（配置表 12 列 / 统计表 17 列），宽度记忆在 localStorage
 const cfgResize = initTableResize('cfgTable', 'qostool.cfgWidths', [90, 115, 62, 115, 62, 62, 82, 82, 72, 72, 72, 72]);
-const statsResize = initTableResize('statsTable', 'qostool.statsWidths', [105, 55, 195, 75, 68, 75, 68, 70, 70, 60, 72, 62, 62, 58]);
+const statsResize = initTableResize('statsTable', 'qostool.statsWidths', [105, 55, 195, 75, 68, 75, 68, 70, 70, 60, 72, 56, 62, 62, 62, 62, 58]);
 // 速率列在 colgroup 中的索引（配置表第 7/8/9 列）
 const RATE_COL_IDX = [6, 7, 8];
 

@@ -8,10 +8,11 @@ import (
 )
 
 // setDSCP 通过 IP_TOS / IPV6_TCLASS 设置 DSCP（TOS 高 6 位）。
-func setDSCP(conn *net.UDPConn, dscp int) error {
+// 非 Windows 平台无 QoS2，qosFlow 返回 nil。
+func setDSCP(conn *net.UDPConn, dscp int) (*qosFlow, error) {
 	raw, err := conn.SyscallConn()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var serr error
 	err = raw.Control(func(fd uintptr) {
@@ -22,7 +23,7 @@ func setDSCP(conn *net.UDPConn, dscp int) error {
 		}
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return serr
+	return nil, serr
 }

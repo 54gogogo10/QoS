@@ -47,11 +47,15 @@ type Status struct {
 // Controller 持有配置与运行状态。Start 启动一轮测试，Stop 停止。
 // 并发安全：Start/Stop/Restart/UpdateConfig/Aggregator/Status 可并发调用。
 type Controller struct {
-	mu      sync.Mutex
-	wg      sync.WaitGroup
-	cfg     *config.Config
-	mode    Mode
-	agg     *stats.Aggregator
+	// lmu 生命周期互斥：Start/Stop/Restart 全程（含停发送后的排空等待与
+	// goroutine 退出等待）串行化，防止停止期间并发 Start 插入导致
+	// 旧一轮的收尾误关新一轮刚打开的日志、或双份发送/抓包 goroutine 泄漏。
+	lmu sync.Mutex
+	mu  sync.Mutex
+	wg  sync.WaitGroup
+	cfg *config.Config
+	mode Mode
+	agg  *stats.Aggregator
 	lastAgg *stats.Aggregator // 上次运行的聚合器（停止后保留，供页面查看）
 
 	senderCancel  context.CancelFunc // 发送 goroutine 的取消（先停）
@@ -61,6 +65,11 @@ type Controller struct {
 	iface         string
 	running       bool
 	started       time.Time
+
+	clockOffsetHint int64 // 控制通道时钟偏差（ns，v2.8.1）：Start 前设置，创建聚合器时应用
+	clockHintSet    bool
+
+	lastStarted time.Time // 上一轮开始时刻（v2.9.0：停止后导出报告用，防零值时间戳）
 
 	drainDelay time.Duration // 停止时：停发送后等待在途包被捕获的时长
 	logDir     string        // 日志根目录（其下建 logs/）；空=不记录
@@ -122,6 +131,8 @@ func (c *Controller) SetMode(m Mode) error {
 
 // Start 在指定接口上启动一轮测试；已在运行时返回错误。
 func (c *Controller) Start(iface string) error {
+	c.lmu.Lock()
+	defer c.lmu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.running {
@@ -133,7 +144,10 @@ func (c *Controller) Start(iface string) error {
 // Stop 停止测试：先停发送，等待在途包被接收端捕获（drainDelay），
 // 再停接收并等待所有 goroutine 退出。停止后保留最后一份统计供页面查看，
 // 并写出汇总日志。未运行时无操作。
+// 持有 lmu 全程：与 Start/Restart 串行，收尾（关日志/写汇总）不会插进新一轮运行。
 func (c *Controller) Stop() {
+	c.lmu.Lock()
+	defer c.lmu.Unlock()
 	c.mu.Lock()
 	if !c.running {
 		c.mu.Unlock()
@@ -141,6 +155,7 @@ func (c *Controller) Stop() {
 	}
 	iface := c.iface
 	startedAt := c.started
+	c.lastStarted = startedAt // 保留上一轮开始时刻：停止后导出报告不再是零值时间（v2.9.0）
 	if c.senderCancel != nil {
 		c.senderCancel() // 1. 先停发送：不再产生新包
 	}
@@ -161,6 +176,10 @@ func (c *Controller) Stop() {
 	}
 	c.wg.Wait() // 4. 等所有 goroutine 退出（socket/pcap 句柄释放）
 
+	if savedAgg != nil {
+		savedAgg.Finalize() // 不再有包到达：宽限期内未补齐的乱序孔洞直接计丢包
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closeLogLocked(savedAgg, startedAt, iface, stopped)
@@ -169,6 +188,8 @@ func (c *Controller) Stop() {
 // Restart 用当前配置在相同接口上重启测试；未运行时无操作。
 // 同样先停发送、延迟停接收，避免尾部差。
 func (c *Controller) Restart() error {
+	c.lmu.Lock()
+	defer c.lmu.Unlock()
 	c.mu.Lock()
 	if !c.running {
 		c.mu.Unlock()
@@ -177,6 +198,7 @@ func (c *Controller) Restart() error {
 	iface := c.iface
 	startedAt := c.started
 	oldAgg := c.agg
+	c.lastStarted = startedAt // 同 Stop：保留开始时刻供停止后导出报告
 	if c.senderCancel != nil {
 		c.senderCancel()
 	}
@@ -188,6 +210,10 @@ func (c *Controller) Restart() error {
 		c.captureCancel()
 	}
 	c.wg.Wait() // 等旧 goroutine 退出、句柄释放后再启动
+
+	if oldAgg != nil {
+		oldAgg.Finalize() // 不再有包到达：宽限期内未补齐的乱序孔洞直接计丢包
+	}
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -268,10 +294,14 @@ func (c *Controller) LastReportPath() string {
 func (c *Controller) WriteHTMLReport() (string, error) {
 	c.mu.Lock()
 	agg, cfg, logDir := c.agg, c.cfg, c.logDir
+	mode := c.mode // 与 SetMode 的写并发，必须在锁内读
 	if agg == nil {
 		agg = c.lastAgg
 	}
 	st := Status{Running: c.running, Iface: c.iface, Started: c.started}
+	if !c.running {
+		st.Started = c.lastStarted // 停止后导出：用上一轮开始时刻（v2.9.0，防 0001-01-01）
+	}
 	c.mu.Unlock()
 	if agg == nil || logDir == "" {
 		return "", fmt.Errorf("无统计数据或未设置日志目录")
@@ -279,8 +309,8 @@ func (c *Controller) WriteHTMLReport() (string, error) {
 	snap := agg.Current(time.Now())
 	vs := report.Verdicts(cfg, snap, true)
 	path, err := report.HTMLReport(cfg, snap, vs, report.ReportMeta{
-		Started: st.Started, Stopped: time.Now(), Iface: st.Iface, Mode: string(c.mode), Version: "v2.7.0",
-	}, filepath.Join(logDir, "logs"))
+		Started: st.Started, Stopped: time.Now(), Iface: st.Iface, Mode: string(mode), Version: report.Version,
+	}, filepath.Join(logDir, "logs"), mode != ModeRecv, agg.DelayHistogram())
 	if err != nil {
 		return "", err
 	}
@@ -288,6 +318,20 @@ func (c *Controller) WriteHTMLReport() (string, error) {
 	c.lastReportPath = path
 	c.mu.Unlock()
 	return path, nil
+}
+
+// SetClockOffsetHint 注入外部时钟偏差估计（ns，控制通道测量，v2.8.1）：
+// 运行中直接注入当前聚合器；未运行时保存，Start 创建聚合器时自动应用
+// （作为时延校正基准，保守融合见 stats.SetClockOffsetHint）。
+func (c *Controller) SetClockOffsetHint(hintNs int64) {
+	c.mu.Lock()
+	c.clockOffsetHint = hintNs
+	c.clockHintSet = true
+	agg := c.agg
+	c.mu.Unlock()
+	if agg != nil {
+		agg.SetClockOffsetHint(hintNs)
+	}
 }
 
 // SetAggregatorForTest 仅供测试注入聚合器（标记为运行中）。
@@ -303,6 +347,10 @@ func (c *Controller) SetAggregatorForTest(agg *stats.Aggregator) {
 // startLocked 启动组件（调用方必须持有锁且 running==false）。
 func (c *Controller) startLocked(iface string) error {
 	agg := stats.NewAggregator(len(c.cfg.Flows), histCap)
+	// v2.8.1：Start 前注入的控制通道时钟偏差应用到新建聚合器
+	if c.clockHintSet {
+		agg.SetClockOffsetHint(c.clockOffsetHint)
+	}
 
 	// 发送与接收使用独立 ctx：停止时先取消发送，延迟后再取消接收
 	sCtx, sCancel := context.WithCancel(context.Background())
@@ -414,6 +462,17 @@ func (c *Controller) openLogLocked(start time.Time) {
 	for i := range c.cfg.Flows {
 		rec = append(rec, fmt.Sprintf("jitter_ms_%d", i+1))
 	}
+	// v2.8.0 追加时延百分位列
+	for i := range c.cfg.Flows {
+		rec = append(rec, fmt.Sprintf("p95_delay_ms_%d", i+1))
+	}
+	for i := range c.cfg.Flows {
+		rec = append(rec, fmt.Sprintf("p99_delay_ms_%d", i+1))
+	}
+	// v2.9.0 追加乱序包数列
+	for i := range c.cfg.Flows {
+		rec = append(rec, fmt.Sprintf("reorder_%d", i+1))
+	}
 	c.csvW.Write(rec)
 	c.csvW.Flush()
 }
@@ -448,6 +507,24 @@ func (c *Controller) writeLogRow(now time.Time, agg *stats.Aggregator) {
 		} else {
 			rec = append(rec, "")
 		}
+	}
+	for _, s := range snap {
+		if s.DelayValid {
+			rec = append(rec, fmt.Sprintf("%.3f", s.DelayP95Ms))
+		} else {
+			rec = append(rec, "")
+		}
+	}
+	for _, s := range snap {
+		if s.DelayValid {
+			rec = append(rec, fmt.Sprintf("%.3f", s.DelayP99Ms))
+		} else {
+			rec = append(rec, "")
+		}
+	}
+	// v2.9.0 乱序包数（累计值）
+	for _, s := range snap {
+		rec = append(rec, fmt.Sprintf("%d", s.Reordered))
 	}
 	c.csvW.Write(rec)
 	c.csvW.Flush()
@@ -484,8 +561,8 @@ func (c *Controller) closeLogLocked(agg *stats.Aggregator, started time.Time, if
 	if agg != nil {
 		snap := agg.Current(stopped)
 		if path, err := report.HTMLReport(c.cfg, snap, report.Verdicts(c.cfg, snap, true), report.ReportMeta{
-			Started: started, Stopped: stopped, Iface: iface, Mode: string(c.mode), Version: "v2.7.0",
-		}, filepath.Join(c.logDir, "logs")); err != nil {
+			Started: started, Stopped: stopped, Iface: iface, Mode: string(c.mode), Version: report.Version,
+		}, filepath.Join(c.logDir, "logs"), c.mode != ModeRecv, agg.DelayHistogram()); err != nil {
 			log.Printf("生成 HTML 报告失败: %v", err)
 		} else {
 			c.lastReportPath = path

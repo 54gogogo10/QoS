@@ -31,10 +31,11 @@ func newTestServer() *Server {
 // injectAgg 把预置统计的聚合器注入控制器（不启动真实测试）。
 func injectAgg(s *Server) {
 	agg := stats.NewAggregator(1, 10)
+	t0 := time.Now()
 	agg.RecordTx(0, 100, 1000)
-	agg.RecordRx(0, 500, 1, time.Now(), 0)
-	agg.RecordRx(0, 500, 5, time.Now(), 0)
-	agg.Snapshot(time.Now())
+	agg.RecordRx(0, 500, 1, t0, 0)
+	agg.RecordRx(0, 500, 5, t0.Add(time.Millisecond), 0) // 空洞 2,3,4
+	agg.Snapshot(t0.Add(time.Second))                     // 超过乱序宽限期 → 结算为丢包
 	s.ctrl(controller.ModeBidir).SetAggregatorForTest(agg)
 }
 
@@ -187,7 +188,7 @@ func TestAPIStatsDelayAndVerdict(t *testing.T) {
 	agg.RecordTx(0, 100, 1000)
 	agg.RecordRx(0, 500, 1, now, now.Add(-5*time.Millisecond).UnixNano())
 	agg.RecordRx(0, 500, 5, now, now.Add(-5*time.Millisecond).UnixNano()) // seq 2-4 丢失 → 60% 丢包
-	agg.Snapshot(now)
+	agg.Snapshot(now.Add(time.Second)) // 超过乱序宽限期：空洞结算为丢包；窗口清零
 	s.ctrl(controller.ModeBidir).SetAggregatorForTest(agg)
 
 	rec := httptest.NewRecorder()
@@ -197,8 +198,8 @@ func TestAPIStatsDelayAndVerdict(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := out.Flows[0]
-	// Snapshot 已清零窗口：窗口 avg=0，累计 avg/min/max 保留
-	if !f.DelayValid || math.Abs(f.DelayTotAvgMs-5) > 1e-6 || math.Abs(f.DelayMaxMs-5) > 1e-6 {
+	// Snapshot 已清零窗口：窗口 avg=0；v2.8.1 单包 5ms 经时钟偏差校正后为 0，偏差估计=5ms
+	if !f.DelayValid || math.Abs(f.DelayTotAvgMs-0) > 1e-6 || math.Abs(f.DelayMaxMs-0) > 1e-6 || math.Abs(f.ClockOffsetMs-5) > 1e-6 {
 		t.Fatalf("时延字段错误: %+v", f)
 	}
 	if f.Verdict != "fail" {
@@ -214,7 +215,7 @@ func TestAPIReport(t *testing.T) {
 	s.ctrl(controller.ModeBidir).SetLogDir(t.TempDir())
 	injectAgg(s)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest("POST", "/api/report", nil)
+	req := httptest.NewRequest("POST", "/api/report", strings.NewReader("{}"))
 	req.Header.Set("Content-Type", "application/json")
 	s.handleReport(rec, req)
 	if rec.Code != http.StatusOK {
@@ -241,5 +242,52 @@ func TestAPIReport(t *testing.T) {
 	s2.handleReport(rec2, httptest.NewRequest("POST", "/api/report", nil))
 	if rec2.Code != http.StatusForbidden {
 		t.Fatalf("CLI 模式 report 应 403, got %d", rec2.Code)
+	}
+}
+
+// TestAPIReportRequiresJSONContentTy 回归（v2.9.0 安全加固）：
+// /api/report 是控制类写操作，必须校验 Content-Type=JSON（防跨站表单 CSRF 刷报告文件）。
+func TestAPIReportRequiresJSONContentType(t *testing.T) {
+	s := newTestServer()
+	s.ctrl(controller.ModeBidir).SetLogDir(t.TempDir())
+	injectAgg(s)
+	// 无 Content-Type（跨站表单可达）：拒绝
+	rec := httptest.NewRecorder()
+	s.handleReport(rec, httptest.NewRequest("POST", "/api/report", strings.NewReader("{}")))
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("无 JSON Content-Type 应 415, got %d", rec.Code)
+	}
+	// 表单 Content-Type：拒绝
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("POST", "/api/report", strings.NewReader("a=1"))
+	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	s.handleReport(rec2, req2)
+	if rec2.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("表单 Content-Type 应 415, got %d", rec2.Code)
+	}
+}
+
+// TestAPIRemoteAddrValidation 回归（v2.9.0 安全加固）：
+// /api/remote 的地址必须为合法 host:port，拒绝任意字符串（防注入 URL）。
+func TestAPIRemoteAddrValidation(t *testing.T) {
+	s := newTestServer()
+	for _, bad := range []string{"javascript:alert(1)", "http://evil/x", "1.2.3.4:http", "[::1", "host:0", "host:70000"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/remote", strings.NewReader(`{"addr":"`+bad+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		s.handleRemote(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("addr %q 应 400, got %d", bad, rec.Code)
+		}
+	}
+	// 合法地址（自动补端口 + 显式端口）应 200
+	for _, ok := range []string{"192.168.1.10", "192.168.1.10:16666", "[::1]:16666"} {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/api/remote", strings.NewReader(`{"addr":"`+ok+`"}`))
+		req.Header.Set("Content-Type", "application/json")
+		s.handleRemote(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("addr %q 应 200, got %d: %s", ok, rec.Code, rec.Body.String())
+		}
 	}
 }
