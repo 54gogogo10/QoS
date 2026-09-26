@@ -13,7 +13,7 @@ import (
 
 // Version 当前工具版本号：HTML 报告与 --json 汇总的 Version 字段统一取自这里，
 // 避免多调用点各自硬编码出现不一致。
-const Version = "v2.9.0"
+const Version = "v2.10.0"
 
 func dscpStr(d config.DSCP) string {
 	if n := d.Name(); n != "" {
@@ -145,17 +145,18 @@ type jsonFlowOut struct {
 }
 
 type jsonSummaryOut struct {
-	OK         bool          `json:"ok"`
-	Mode       string        `json:"mode"`
-	Iface      string        `json:"iface"`
-	Started    string        `json:"started"`
-	Stopped    string        `json:"stopped"`
-	DurationS  float64       `json:"duration_s"`
-	Version    string        `json:"version"`
-	HTMLReport string        `json:"html_report,omitempty"`
-	Verdict    string        `json:"verdict"` // pass / fail / none（未配置阈值或发送端无判定）
-	FailCount  int           `json:"fail_count"`
-	Flows      []jsonFlowOut `json:"flows"`
+	OK          bool          `json:"ok"`
+	Mode        string        `json:"mode"`
+	Iface       string        `json:"iface"`
+	Started     string        `json:"started"`
+	Stopped     string        `json:"stopped"`
+	DurationS   float64       `json:"duration_s"`
+	Version     string        `json:"version"`
+	HTMLReport  string        `json:"html_report,omitempty"`
+	AutoStopped string        `json:"auto_stopped,omitempty"` // v2.10.0 阈值越限自动停止原因
+	Verdict     string        `json:"verdict"`                // pass / fail / none（未配置阈值或发送端无判定）
+	FailCount   int           `json:"fail_count"`
+	Flows       []jsonFlowOut `json:"flows"`
 }
 
 // JSONSummary 渲染 --json 模式的机器可读汇总（v2.8.0）。
@@ -217,7 +218,8 @@ func JSONSummary(cfg *config.Config, snap []stats.FlowSnapshot, verdicts []Verdi
 		Started: meta.Started.Format(time.RFC3339), Stopped: meta.Stopped.Format(time.RFC3339),
 		DurationS: meta.Stopped.Sub(meta.Started).Seconds(),
 		Version:   meta.Version, HTMLReport: htmlReportPath,
-		Verdict: verdict, FailCount: failCount, Flows: flows,
+		AutoStopped: meta.AutoStopReason,
+		Verdict:     verdict, FailCount: failCount, Flows: flows,
 	}
 	return json.MarshalIndent(out, "", "  ")
 }

@@ -92,6 +92,10 @@
     </select>
     <button id="btnStart" class="primary">开始测试</button>
     <button id="btnStop" class="stop" disabled>停止</button>
+    <label id="lblLiveScale" style="display:none">调速倍率</label>
+    <input id="liveScale" placeholder="1.5" style="width:64px;display:none" title="运行中按倍率调整全部流速率（相对配置速率，不重启测试）">
+    <button id="btnLiveScale" style="display:none">应用调速</button>
+    <span id="liveScaleNow" class="hint" style="display:none"></span>
     <button id="btnReport" style="display:none">导出报告</button>
     <span id="runHint" class="hint"></span>
   </div>
@@ -111,6 +115,8 @@
   </table>
   <div class="row" style="margin-top:8px">
     <button id="btnApply" class="primary">应用配置</button>
+    <label>自动停止(秒)</label>
+    <input id="autoStopSec" style="width:70px" placeholder="0" title="任一配置阈值的流持续越限该秒数后自动停止并生成报告（0=禁用）">
     <span class="hint">应用后若测试正在运行将自动重启；DSCP 可填 0-63 或名字（EF/AF41/CS7）</span>
   </div>
   <div class="row" style="margin-top:4px">
@@ -188,10 +194,7 @@ function applyIface() {
   localStorage.setItem('qostool.iface', lastIface);
   // 记录接口选择（发送端通知自动监听时使用，无需先手动开始监听）
   if (lastIface) {
-    fetch('/api/iface', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({iface: lastIface}),
-    }).catch(() => {});
+    apiPost('/api/iface', {iface: lastIface}).catch(() => {});
   }
 }
 
@@ -200,6 +203,7 @@ function applyIface() {
 function loadConfig() {
   fetch('/api/config?mode=' + currentMode).then(r => r.json()).then(cfg => {
     buildLegend(cfg.flows);
+    $('autoStopSec').value = cfg.auto_stop_sec > 0 ? cfg.auto_stop_sec : '';
     const body = $('cfgBody');
     body.innerHTML = '';
     for (const f of cfg.flows) {
@@ -311,6 +315,31 @@ function linkRates(row) {
 
 const esc = v => String(v).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
+// ---------- 控制类请求公共封装（v2.10.0） ----------
+
+// authHeaders 控制类请求附带访问令牌（服务端 --token 启用后必须匹配）。
+function authHeaders() {
+  const h = {'Content-Type': 'application/json'};
+  const tok = localStorage.getItem('qostool.token');
+  if (tok) h['X-Auth-Token'] = tok;
+  return h;
+}
+
+// apiPost 控制类 POST：遇 401（令牌缺失/错误）时弹窗询问令牌并自动重试一次。
+// signal 可选（AbortController 超时中止）。
+async function apiPost(url, body, signal) {
+  const send = () => fetch(url, {method: 'POST', headers: authHeaders(), body: JSON.stringify(body || {}), signal});
+  let r = await send();
+  if (r.status === 401) {
+    const tok = prompt('本服务已启用访问令牌（--token），请输入令牌：');
+    if (tok != null && tok !== '') {
+      localStorage.setItem('qostool.token', tok);
+      r = await send();
+    }
+  }
+  return r;
+}
+
 async function applyConfig() {
   const rows = document.querySelectorAll('#cfgBody tr');
   const isRecv = currentMode === 'recv';
@@ -335,12 +364,9 @@ async function applyConfig() {
     flow.max_jitter_ms = +get('max_jitter_ms') || 0;
     flows.push(flow);
   }
+  const autoStop = parseFloat($('autoStopSec').value) || 0;
   try {
-    const r = await fetch('/api/config?mode=' + currentMode, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({flows}),
-    });
+    const r = await apiPost('/api/config?mode=' + currentMode, {flows, auto_stop_sec: autoStop});
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || r.statusText);
     showMsg(d.restarted ? '配置已应用，测试已自动重启' : '配置已应用（未运行）', false);
@@ -376,6 +402,12 @@ function refreshRoleUI() {
   $('lblLossMode').style.display = isRecv ? '' : 'none';
   $('lossMode').style.display = isRecv ? '' : 'none';
   $('btnStart').textContent = isSend ? '开始发送' : isRecv ? '开始监听' : '开始测试';
+  // 实时调速：接收端无发送引擎不可用（app/CLI 有控制权时才显示，loadStatus 里再按权限收起）
+  const showScale = !isRecv;
+  $('lblLiveScale').style.display = showScale ? '' : 'none';
+  $('liveScale').style.display = showScale ? '' : 'none';
+  $('btnLiveScale').style.display = showScale ? '' : 'none';
+  $('liveScaleNow').style.display = showScale ? '' : 'none';
   // 表头：发送端角色 TX 为本端；接收端角色 TX 列显示远端发送端速率
   $('thTxMbps').textContent = isRecv ? '远端TX Mbps' : 'TX Mbps';
   $('thTxPps').textContent = isRecv ? '远端TX pps' : 'TX pps';
@@ -411,10 +443,7 @@ async function doStart() {
     const receivers = currentMode === 'send'
       ? [...document.querySelectorAll('#recvList input[type="checkbox"]:checked')].map(cb => cb.dataset.addr)
       : [];
-    const r = await fetch('/api/start', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({iface, mode: currentMode, receivers}), signal: ac.signal,
-    });
+    const r = await apiPost('/api/start', {iface, mode: currentMode, receivers}, ac.signal);
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
     showMsg(d.message || ((isSend ? '发送' : '测试') + '已启动' + (isSend ? '' : '（接口 ' + iface + '）')), false);
@@ -476,10 +505,7 @@ async function setRemote() {
   const addr = $('remoteAddr').value.trim();
   if (!addr) { showMsg('请输入发送端地址，如 192.168.1.10:16666', true); return; }
   try {
-    const r = await fetch('/api/remote', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({addr}),
-    });
+    const r = await apiPost('/api/remote', {addr});
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || r.statusText);
     showMsg('发送端地址已设置: ' + addr + '（每秒同步 TX 统计）', false);
@@ -488,13 +514,22 @@ async function setRemote() {
 
 async function doStop() {
   try {
-    const r = await fetch('/api/stop', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({mode: currentMode}),
-    });
+    const r = await apiPost('/api/stop', {mode: currentMode});
     if (!r.ok) throw new Error(r.statusText);
     showMsg('已停止', false);
   } catch (e) { showMsg('停止失败: ' + e.message, true); }
+}
+
+// doLiveScale 运行中动态调速（v2.10.0）：按倍率缩放全部流速率，不重启测试。
+async function doLiveScale() {
+  const v = parseFloat($('liveScale').value);
+  if (!(v > 0) || v > 1000) { showMsg('调速倍率必须是 (0, 1000] 内的数字，如 1.5', true); return; }
+  try {
+    const r = await apiPost('/api/rates?mode=' + currentMode, {mode: currentMode, scale: v});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.error || r.statusText);
+    showMsg(d.message || '已调速', false);
+  } catch (e) { showMsg('调速失败: ' + e.message, true); }
 }
 
 // ---------- 状态 ----------
@@ -511,7 +546,7 @@ async function loadStatus() {
       badge.className = 'badge running';
       $('btnStart').disabled = true;
       $('btnStop').disabled = false;
-      $('runHint').textContent = '';
+      $('runHint').textContent = cur.stop_reason ? '⚠ ' + cur.stop_reason : '';
       window._logFile = cur.log_file;
     } else {
       badge.textContent = '已停止';
@@ -521,22 +556,24 @@ async function loadStatus() {
       if (st.send && st.send.running) others.push('发送端运行中');
       if (st.recv && st.recv.running) others.push('接收端运行中');
       if (st.bidir && st.bidir.running) others.push('双向运行中');
-      $('runHint').textContent = (others.length ? '【' + others.join(' / ') + '】' : '') +
+      $('runHint').textContent = (cur.stop_reason ? '⚠ ' + cur.stop_reason : '') +
+        (others.length ? '【' + others.join(' / ') + '】' : '') +
         (cur.log_file ? ' · 日志: ' + cur.log_file : '');
       updateStartButton();
     }
     $('btnApply').disabled = !remoteControl;
     $('iface').disabled = !remoteControl;
     $('btnReport').style.display = remoteControl ? '' : 'none';
+    $('btnLiveScale').disabled = !remoteControl || !cur.running;
+    $('liveScale').disabled = !remoteControl;
+    if (!remoteControl) $('liveScaleNow').textContent = '';
   } catch (e) { /* 服务未就绪 */ }
 }
 
 // doReport 导出 HTML 报告（服务端按当前统计生成）。
 async function doReport() {
   try {
-    const r = await fetch('/api/report?mode=' + currentMode, {
-      method: 'POST', headers: {'Content-Type': 'application/json'}, body: '{}',
-    });
+    const r = await apiPost('/api/report?mode=' + currentMode, {});
     const d = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(d.error || r.statusText);
     showMsg('报告已生成: ' + d.path, false);
@@ -782,6 +819,10 @@ async function tick() {
     const d = await r.json();
     lastStats = d;
     document.getElementById('clock').textContent = new Date(d.now).toLocaleTimeString();
+    if (currentMode !== 'recv') {
+      const ls = +d.live_scale || 1;
+      $('liveScaleNow').textContent = d.running && ls !== 1 ? '当前 ' + ls.toFixed(2) + 'x' : '';
+    }
     drawChart(d.history);
     renderTable(d.flows, d.running, d.remote);
     updateRemoteStatus(d.remote);
@@ -814,6 +855,7 @@ $('btnRefreshIface').onclick = () => loadInterfaces(false);
 $('iface').onchange = () => { applyIface(); updateStartButton(); };
 $('role').onchange = e => setRole(e.target.value);
 $('btnRemote').onclick = setRemote;
+$('btnLiveScale').onclick = doLiveScale;
 $('btnApplyIfaceIP').onclick = applyIfaceIP;
 refreshRoleUI();
 

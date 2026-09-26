@@ -28,6 +28,11 @@ func reportLoop(ctx context.Context, cfg *config.Config, ctrl *controller.Contro
 			return
 		case <-timer.C:
 		}
+		// v2.10.0：控制器已停止（阈值越限自动停止/双机同步停止）时结束展示循环，
+		// 让 CLI 立即输出汇总并返回，而不是空转到 -d 时长结束
+		if !ctrl.Status().Running {
+			return
+		}
 		agg := ctrl.Aggregator()
 		if agg == nil {
 			continue

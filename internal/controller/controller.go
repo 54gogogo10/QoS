@@ -40,8 +40,10 @@ type Status struct {
 	Running    bool      `json:"running"`
 	Iface      string    `json:"iface"`
 	Started    time.Time `json:"started"`
-	LogFile    string    `json:"log_file"`    // 本次运行的 CSV 日志路径（空=未启用）
-	ReportFile string    `json:"report_file"` // 最近一次生成的 HTML 报告路径（空=未生成）
+	LogFile    string    `json:"log_file"`              // 本次运行的 CSV 日志路径（空=未启用）
+	ReportFile string    `json:"report_file"`           // 最近一次生成的 HTML 报告路径（空=未生成）
+	LiveScale  float64   `json:"live_scale"`            // 当前动态调速倍率（v2.10.0，1=配置基准速率）
+	StopReason string    `json:"stop_reason,omitempty"` // 自动停止原因（v2.10.0，空=非自动停止）
 }
 
 // Controller 持有配置与运行状态。Start 启动一轮测试，Stop 停止。
@@ -50,38 +52,57 @@ type Controller struct {
 	// lmu 生命周期互斥：Start/Stop/Restart 全程（含停发送后的排空等待与
 	// goroutine 退出等待）串行化，防止停止期间并发 Start 插入导致
 	// 旧一轮的收尾误关新一轮刚打开的日志、或双份发送/抓包 goroutine 泄漏。
-	lmu sync.Mutex
-	mu  sync.Mutex
-	wg  sync.WaitGroup
-	cfg *config.Config
-	mode Mode
-	agg  *stats.Aggregator
+	lmu     sync.Mutex
+	mu      sync.Mutex
+	wg      sync.WaitGroup
+	cfg     *config.Config
+	mode    Mode
+	agg     *stats.Aggregator
 	lastAgg *stats.Aggregator // 上次运行的聚合器（停止后保留，供页面查看）
 
-	senderCancel  context.CancelFunc // 发送 goroutine 的取消（先停）
-	captureCancel context.CancelFunc // 接收 goroutine 的取消（后停）
+	senderCancel  context.CancelFunc           // 发送 goroutine 的取消（先停）
+	captureCancel context.CancelFunc           // 接收 goroutine 的取消（后停）
+	sender        *sender.Sender               // 当前发送引擎（动态调速用，v2.10.0）
+	liveScale     float64                      // 当前动态调速倍率（1=配置基准，v2.10.0）
 	cap           *capture.Capturer            // 当前抓包器（IfaceStats 诊断用）
 	remoteTX      atomic.Pointer[RemoteTXFunc] // 远端发送端 TX 数据提供者（recv 模式日志用）
 	iface         string
 	running       bool
 	started       time.Time
 
+	// 自动停止看门狗（v2.10.0）：阈值越限持续 autoStop 秒后自动停止。
+	autoStopDur time.Duration // 0=禁用
+	breachSince time.Time     // 当前连续越限起点（零值=未越限）
+	stopReason  string        // 自动停止原因（写入 Status，空=非自动停止）
+
 	clockOffsetHint int64 // 控制通道时钟偏差（ns，v2.8.1）：Start 前设置，创建聚合器时应用
 	clockHintSet    bool
 
 	lastStarted time.Time // 上一轮开始时刻（v2.9.0：停止后导出报告用，防零值时间戳）
 
-	drainDelay time.Duration // 停止时：停发送后等待在途包被捕获的时长
-	logDir     string        // 日志根目录（其下建 logs/）；空=不记录
-	logFile    *os.File
-	csvW       *csv.Writer
-	logPath    string // 本次 CSV 日志路径
+	drainDelay     time.Duration // 停止时：停发送后等待在途包被捕获的时长
+	logDir         string        // 日志根目录（其下建 logs/）；空=不记录
+	logFile        *os.File
+	csvW           *csv.Writer
+	logPath        string // 本次 CSV 日志路径
 	lastReportPath string // 最近一次生成的 HTML 报告路径（停止时/导出按钮）
 }
 
 // New 创建控制器。
 func New(cfg *config.Config, mode Mode) *Controller {
-	return &Controller{cfg: cfg, mode: mode, drainDelay: drainDelay}
+	c := &Controller{cfg: cfg, mode: mode, drainDelay: drainDelay, liveScale: 1.0}
+	if cfg != nil {
+		c.autoStopDur = autoStopDuration(cfg.AutoStopSec)
+	}
+	return c
+}
+
+// autoStopDuration 把配置的秒数转为时长（非法值视为禁用）。
+func autoStopDuration(sec float64) time.Duration {
+	if sec <= 0 {
+		return 0
+	}
+	return time.Duration(sec * float64(time.Second))
 }
 
 // RemoteTXFunc 返回远端发送端的 TX 统计（pps/包数/字节），ok=false 表示无远端数据。
@@ -165,6 +186,7 @@ func (c *Controller) Stop() {
 	c.lastAgg = c.agg // 保留最后数据，停止后页面仍可查看
 	c.agg = nil
 	c.cap = nil
+	c.sender = nil
 	c.started = time.Time{}
 	stopped := time.Now()
 	c.mu.Unlock()
@@ -245,6 +267,9 @@ func (c *Controller) startWithRetryLocked(iface string) error {
 func (c *Controller) UpdateConfig(cfg *config.Config) (restarted bool, err error) {
 	c.mu.Lock()
 	c.cfg = cfg
+	// auto_stop_sec 随配置即时生效（v2.10.0）；运行中重启后由新采样循环执行
+	c.autoStopDur = autoStopDuration(cfg.AutoStopSec)
+	c.breachSince = time.Time{}
 	running := c.running
 	c.mu.Unlock()
 	if running {
@@ -280,7 +305,8 @@ func (c *Controller) IfaceStats() capture.IfaceStats {
 func (c *Controller) Status() Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return Status{Running: c.running, Iface: c.iface, Started: c.started, LogFile: c.logPath, ReportFile: c.lastReportPath}
+	return Status{Running: c.running, Iface: c.iface, Started: c.started, LogFile: c.logPath,
+		ReportFile: c.lastReportPath, LiveScale: c.liveScale, StopReason: c.stopReason}
 }
 
 // LastReportPath 返回最近一次生成的 HTML 报告路径（空=未生成）。
@@ -334,6 +360,54 @@ func (c *Controller) SetClockOffsetHint(hintNs int64) {
 	}
 }
 
+// maxLiveScale 运行中动态调速的倍率上限：过大的倍率会把包间隔压到 1ns、
+// 批量膨胀到数十万包/批，等效于无 pacing 洪泛，超出"调速"语义。
+const maxLiveScale = 1000
+
+// ScaleRates 运行中按倍率动态调整全部流速率（v2.10.0）：以当前配置速率为基准，
+// 复用发送引擎的原子 pacing 更新，不重启测试、seq 不中断，累计统计保持连续。
+// 倍率取值 (0, 1000]；未运行、接收端角色（无发送引擎）或速率非法时返回错误，
+// 返回值为应用后的倍率（失败时为当前值，便于 UI 回显）。
+func (c *Controller) ScaleRates(factor float64) (applied float64, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if factor <= 0 || factor > maxLiveScale || factor != factor {
+		return c.liveScale, fmt.Errorf("调速倍率必须在 (0, %d]，当前 %v", maxLiveScale, factor)
+	}
+	if !c.running {
+		return c.liveScale, fmt.Errorf("测试未运行，无法调速")
+	}
+	if c.mode == ModeRecv || c.sender == nil {
+		return c.liveScale, fmt.Errorf("接收端角色无发送引擎，不支持调速")
+	}
+	specs := make([]sender.RateSpec, len(c.cfg.Flows))
+	for i, f := range c.cfg.Flows {
+		specs[i] = sender.RateSpec{RateMbps: f.RateMbps * factor, RatePPS: f.RatePPS * factor}
+	}
+	if err := c.sender.SetRates(specs); err != nil {
+		return c.liveScale, err
+	}
+	c.liveScale = factor
+	return c.liveScale, nil
+}
+
+// LiveScale 返回当前动态调速倍率（1.0=配置基准速率；重新开始后复位）。
+func (c *Controller) LiveScale() float64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.liveScale
+}
+
+// SetAutoStop 设置阈值越限自动停止（v2.10.0）：任一已配置阈值的流持续越限
+// dur 时长后自动停止测试并记录原因（Status.StopReason）。dur<=0 禁用。
+// 运行中也可调用：下一次采样循环即生效。
+func (c *Controller) SetAutoStop(dur time.Duration) {
+	c.mu.Lock()
+	c.autoStopDur = dur
+	c.breachSince = time.Time{}
+	c.mu.Unlock()
+}
+
 // SetAggregatorForTest 仅供测试注入聚合器（标记为运行中）。
 func (c *Controller) SetAggregatorForTest(agg *stats.Aggregator) {
 	c.mu.Lock()
@@ -381,7 +455,11 @@ func (c *Controller) startLocked(iface string) error {
 
 	c.agg, c.iface, c.running, c.started = agg, iface, true, time.Now()
 	c.cap = cap
-	c.lastAgg = nil // 新一轮测试开始，清掉上一轮数据
+	c.sender = s
+	c.liveScale = 1.0 // 新一轮从配置基准速率开始
+	c.breachSince = time.Time{}
+	c.stopReason = "" // 新一轮不继承上一轮的自动停止原因
+	c.lastAgg = nil   // 新一轮测试开始，清掉上一轮数据
 	c.senderCancel, c.captureCancel = sCancel, cCancel
 	if c.logDir != "" {
 		c.openLogLocked(c.started) // 日志失败不阻塞测试
@@ -410,7 +488,8 @@ func (c *Controller) startLocked(iface string) error {
 	return nil
 }
 
-// sampleLoop 每 100ms 采样一次快照（速率与历史），每 1s 写一行 CSV 日志。
+// sampleLoop 每 100ms 采样一次快照（速率与历史），每 1s 写一行 CSV 日志；
+// 启用自动停止时做阈值越限看门狗（v2.10.0）。
 func (c *Controller) sampleLoop(ctx context.Context, agg *stats.Aggregator) {
 	ticker := time.NewTicker(sampleInterval)
 	defer ticker.Stop()
@@ -420,13 +499,62 @@ func (c *Controller) sampleLoop(ctx context.Context, agg *stats.Aggregator) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			agg.Snapshot(now)
+			snap := agg.Snapshot(now)
 			n++
 			if n%logRowEvery == 0 {
 				c.writeLogRow(now, agg)
 			}
+			if c.autoStopTriggered(snap, now) {
+				return
+			}
 		}
 	}
+}
+
+// autoStopTriggered 自动停止看门狗（v2.10.0）：任一配置阈值的流在实时口径下
+// （与 Web PASS/FAIL 徽标同口径：100ms 窗口时延 + seq 空洞丢包）持续越限
+// autoStopDur 后记录原因并异步触发 Stop，返回 true 表示已触发（调用方退出采样循环）。
+// 必须异步触发：Stop 会 wg.Wait 等待采样循环自身退出，同步调用死锁。
+func (c *Controller) autoStopTriggered(snap []stats.FlowSnapshot, now time.Time) bool {
+	c.mu.Lock()
+	dur := c.autoStopDur
+	if dur <= 0 || !c.running {
+		c.mu.Unlock()
+		return false
+	}
+	breached := false
+	for _, v := range report.Verdicts(c.cfg, snap, false) {
+		if v.Checked && !v.Pass {
+			breached = true
+			break
+		}
+	}
+	if !breached {
+		c.breachSince = time.Time{}
+		c.mu.Unlock()
+		return false
+	}
+	if c.breachSince.IsZero() {
+		c.breachSince = now
+		c.mu.Unlock()
+		return false
+	}
+	if now.Sub(c.breachSince) < dur {
+		c.mu.Unlock()
+		return false
+	}
+	c.stopReason = fmt.Sprintf("任一流阈值越限持续 %s（自 %s 起），已自动停止",
+		dur.Round(time.Second), c.breachSince.Format("15:04:05"))
+	reason := c.stopReason
+	started := c.started // 会话保护：异步 Stop 前若发生并发 Restart（新一轮已开始）则放弃
+	c.mu.Unlock()
+	log.Printf("[controller] %s", reason)
+	go func() {
+		if cur := c.Status(); cur.Running && cur.Started.Equal(started) {
+			c.Stop()
+		}
+	}()
+	return true
 }
 
 // openLogLocked 创建本次运行的 CSV 日志（调用方持有锁）。

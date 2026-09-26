@@ -25,8 +25,8 @@ import (
 )
 
 const (
-	defaultWebAddr = ":16666"        // 监听所有接口（跨机器访问/远端同步需要）
-	localhostURL  = "http://127.0.0.1:16666"
+	defaultWebAddr = ":16666" // 监听所有接口（跨机器访问/远端同步需要）
+	localhostURL   = "http://127.0.0.1:16666"
 	histCap        = 3000
 )
 
@@ -69,7 +69,7 @@ func (e *testFailedError) Error() string {
 }
 
 // usageError 用法错误（v2.9.0 审计修复）：缺参数/参数非法按契约退出码 2
-//（此前误用 1，与 README/usage 声明的 "2=用法错误" 不符）。
+// （此前误用 1，与 README/usage 声明的 "2=用法错误" 不符）。
 type usageError struct {
 	msg string
 }
@@ -112,6 +112,10 @@ func usage() {
         控制 API 无认证，绑定回环可避免内网其他主机控制测试（v2.9.0）
 --no-sysconfig: 管理员运行时默认自动放行系统对应用 DSCP 标记的限制
         （DisableUserTOSSetting=0 + Do not use NLA=1，退出自动恢复），此开关禁用
+--token: 控制面访问令牌（v2.10.0）。设置后控制类 API 必须携带匹配的
+        X-Auth-Token 头；双机收发同步两端需配置同一 token（接收端也加 --token）
+auto_stop_sec: 配置文件全局项（v2.10.0）。任一配置阈值的流持续越限该秒数
+        后自动停止测试并生成报告（退出码 1），适合无人值守/CI
 `)
 }
 
@@ -149,6 +153,11 @@ func runApp() error {
 		ctrls[m] = ctrl
 	}
 	srv := web.New(ctrls, cfgPaths, true)
+	// v2.10.0：桌面模式无命令行入口，控制面令牌用环境变量 QOSTOOL_TOKEN 配置
+	if tok := os.Getenv("QOSTOOL_TOKEN"); tok != "" {
+		warnWeakToken(tok)
+		srv.SetToken(tok)
+	}
 	// recv 模式日志/汇总的 TX 列使用远端发送端数据（而非本端 0）
 	if ctrl := ctrls[controller.ModeRecv]; ctrl != nil {
 		ctrl.SetRemoteTXProvider(srv.RemoteTXProvider)
@@ -213,6 +222,7 @@ func runCLI(mode string, args []string) error {
 	interval := fs.Int("interval", 100, "统计采样间隔毫秒")
 	jsonOut := fs.Bool("json", false, "只输出 JSON 汇总（退出码 0=通过 1=未通过）")
 	noSysConfig := fs.Bool("no-sysconfig", false, "不自动修改系统 DSCP 注册表设置（管理员时默认自动）")
+	token := fs.String("token", "", "Web 控制面访问令牌（v2.10.0；设置后控制 API 须携带匹配的 X-Auth-Token 头，双机同步两端用同值）")
 	fs.Parse(args)
 
 	if mode == "lsdev" {
@@ -282,6 +292,11 @@ func runCLI(mode string, args []string) error {
 	if *webPort != "off" {
 		srv = web.New(map[controller.Mode]*controller.Controller{ctrlMode: ctrl},
 			map[controller.Mode]string{ctrlMode: *cfgPath}, false) // CLI 模式下页面只读
+		// v2.10.0：控制面令牌（须在 ListenAndServe 前设置）
+		if *token != "" {
+			warnWeakToken(*token)
+			srv.SetToken(*token)
+		}
 		if *remote != "" {
 			if !strings.Contains(*remote, ":") {
 				*remote += ":16666"
@@ -333,7 +348,10 @@ func runCLI(mode string, args []string) error {
 	if !*jsonOut {
 		reportLoop(ctx, cfg, ctrl, time.Duration(*interval)*time.Millisecond)
 	} else {
-		<-ctx.Done() // JSON 模式：不打印实时表格，等待结束
+		// JSON 模式：不打印实时表格，等待结束（Ctrl+C/时长到/自动停止 v2.10.0）
+		for ctx.Err() == nil && ctrl.Status().Running {
+			time.Sleep(200 * time.Millisecond)
+		}
 	}
 
 	ctrl.Stop()
@@ -351,6 +369,8 @@ func runCLI(mode string, args []string) error {
 	if agg == nil {
 		return nil
 	}
+	// v2.10.0：阈值越限自动停止原因（看门狗触发时非空；手动停止/正常结束为空）
+	stopReason := ctrl.Status().StopReason
 	snap := agg.Current(time.Now())
 	// 丢包口径与文本汇总/报告一致：recv 模式 TX 来自远端轮询（滞后最多 1s），不计尾部差
 	withTailDiff := ctrlMode != controller.ModeRecv
@@ -362,6 +382,7 @@ func runCLI(mode string, args []string) error {
 	if *jsonOut {
 		b, err := report.JSONSummary(cfg, snap, vs, report.ReportMeta{
 			Started: startedAt, Stopped: time.Now(), Iface: *iface, Mode: string(ctrlMode), Version: report.Version,
+			AutoStopReason: stopReason,
 		}, withTailDiff, ctrl.LastReportPath())
 		if err != nil {
 			return err
@@ -370,6 +391,9 @@ func runCLI(mode string, args []string) error {
 	} else {
 		txTotal, rxTotal, lost := agg.Totals()
 		fmt.Println()
+		if stopReason != "" {
+			fmt.Println("⚠ 自动停止:", stopReason)
+		}
 		fmt.Print(report.Summary(cfg, snap, txTotal, rxTotal, lost, withTailDiff))
 		// v2.8.1 控制通道时钟偏差（与测试流 min 法互相印证）
 		if ctrlMode == controller.ModeRecv && srv != nil {
@@ -387,6 +411,11 @@ func runCLI(mode string, args []string) error {
 		if v.Checked && !v.Pass {
 			failed = append(failed, cfg.Flows[i].Name)
 		}
+	}
+	// v2.10.0：阈值越限自动停止视为未通过（即使最终累计口径恰好达标，
+	// 运行中途持续越限已构成故障证据），退出码 1 让 CI 感知
+	if stopReason != "" {
+		failed = append(failed, stopReason)
 	}
 	if len(failed) > 0 {
 		return &testFailedError{flows: failed}
@@ -537,6 +566,14 @@ func writeSweepCSV(f *os.File, cfg *config.Config, res *sweep.Result) {
 	rec = []string{"极限倍率", fmt.Sprintf("%.2f", res.LimitScale)}
 	w.Write(rec)
 	w.Flush()
+}
+
+// warnWeakToken 弱令牌提示（v2.10.0）：令牌是控制面唯一认证凭据，
+// 过短会被限流内的暴力枚举猜中；不强制拒绝（兼容测试用途），仅告警。
+func warnWeakToken(tok string) {
+	if len(tok) < 8 {
+		fmt.Fprintln(os.Stderr, "警告: token 少于 8 个字符，建议使用更长的随机串（如 openssl rand -hex 16）")
+	}
 }
 
 // hasClockSample 控制通道时钟测量是否已有可用样本。

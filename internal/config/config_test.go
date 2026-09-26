@@ -65,6 +65,8 @@ func TestLoadErrors(t *testing.T) {
 		{"端口 0", "flows:\n  - name: a\n    protocol: udp\n    src_ip: 1.1.1.1\n    dst_ip: 2.2.2.2\n    src_port: 0\n    dst_port: 2\n    dscp: 0\n    rate_pps: 100\n"},
 		{"家族不匹配", "flows:\n  - name: a\n    protocol: udp\n    src_ip: 1.1.1.1\n    dst_ip: ::1\n    src_port: 1\n    dst_port: 2\n    dscp: 0\n    rate_pps: 100\n"},
 		{"dscp 越界", "flows:\n  - name: a\n    protocol: udp\n    src_ip: 1.1.1.1\n    dst_ip: 2.2.2.2\n    src_port: 1\n    dst_port: 2\n    dscp: 64\n    rate_pps: 100\n"},
+		{"auto_stop_sec 为负", "auto_stop_sec: -1\nflows:\n" + flowLine()},
+		{"auto_stop_sec 超上限", "auto_stop_sec: 2592001\nflows:\n" + flowLine()},
 	}
 	for _, c := range cases {
 		if _, err := Load(writeTemp(t, c.yaml)); err == nil {

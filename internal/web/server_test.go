@@ -140,15 +140,52 @@ func TestControlDisabledInCLIMode(t *testing.T) {
 	s := New(map[controller.Mode]*controller.Controller{
 		controller.ModeBidir: controller.New(cfg, controller.ModeBidir),
 	}, map[controller.Mode]string{}, false) // CLI 模式
+	// 页面手动启停（无 remote 标记）必须被 403 拒绝
 	rec := httptest.NewRecorder()
-	s.handleStart(rec, httptest.NewRequest("POST", "/api/start", strings.NewReader(`{"iface":"x"}`)))
+	req := httptest.NewRequest("POST", "/api/start", strings.NewReader(`{"iface":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	s.handleStart(rec, req)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("CLI 模式下 start 应返回 403, got %d", rec.Code)
 	}
 	rec2 := httptest.NewRecorder()
-	s.handleConfig(rec2, httptest.NewRequest("POST", "/api/config", strings.NewReader(`{"flows":[]}`)))
+	req2 := httptest.NewRequest("POST", "/api/config", strings.NewReader(`{"flows":[]}`))
+	req2.Header.Set("Content-Type", "application/json")
+	s.handleConfig(rec2, req2)
 	if rec2.Code != http.StatusForbidden {
 		t.Fatalf("CLI 模式下 POST config 应返回 403, got %d", rec2.Code)
+	}
+}
+
+// TestRemoteStartAcceptedInCLIMode CLI 只读模式下，带 remote 标记的机器间
+// 同步启动通知必须被接受（发送端推送接收端开始监听，v2.8.1 设计意图）。
+// v2.9.0 及之前 handleStart 入口的 requireControl 会把它 403 拒绝，
+// 导致 CLI 双机同步启动失效——本测试为回归防护。
+func TestRemoteStartAcceptedInCLIMode(t *testing.T) {
+	cfg := &config.Config{Flows: []config.Flow{
+		{Name: "ef", SrcIP: "127.0.0.1", DstIP: "127.0.0.1", SrcPort: 1, DstPort: 2, DSCP: 46, RateMbps: 1, IPLen: 92},
+	}}
+	s := New(map[controller.Mode]*controller.Controller{
+		controller.ModeRecv: controller.New(cfg, controller.ModeRecv),
+	}, map[controller.Mode]string{}, false) // CLI 模式：页面只读
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/start", strings.NewReader(`{"mode":"recv","remote":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	s.handleStart(rec, req)
+	if rec.Code == http.StatusForbidden || rec.Code == http.StatusUnauthorized {
+		t.Fatalf("CLI 模式下 remote start 不应被控制权门禁拒绝, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	// 无 iface 且无 lastIface：应进入接口处理逻辑并提示缺参（而非 403 拒绝）
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "iface") {
+		t.Fatalf("remote start 应进入接口处理逻辑（CLI 只读只挡页面控制）, got %d (body=%s)", rec.Code, rec.Body.String())
+	}
+	// 显式带 iface 的 remote 通知应记录监听接口（供后续无 iface 通知沿用）
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("POST", "/api/start", strings.NewReader(`{"mode":"recv","remote":true,"iface":"wan0"}`))
+	req2.Header.Set("Content-Type", "application/json")
+	s.handleStart(rec2, req2)
+	if s.lastIface != "wan0" {
+		t.Fatalf("remote start 应记录监听接口, got %q", s.lastIface)
 	}
 }
 

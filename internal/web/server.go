@@ -27,9 +27,15 @@ var staticFS embed.FS
 // Server 提供页面与 JSON API：监控 + 运行控制（接口选择、启停、配置编辑）。
 type Server struct {
 	ctrls         map[controller.Mode]*controller.Controller // 每角色独立实例
-	cfgPaths      map[controller.Mode]string                // 每角色独立配置文件
-	remoteControl bool                                      // true=页面可启停/改配置（app 模式）；false=只读监控（CLI 模式）
+	cfgPaths      map[controller.Mode]string                 // 每角色独立配置文件
+	remoteControl bool                                       // true=页面可启停/改配置（app 模式）；false=只读监控（CLI 模式）
 	srv           *http.Server
+
+	// 控制面访问控制（v2.10.0）：token 为空=不校验（旧行为）；
+	// 非空时控制类端点必须携带匹配的 X-Auth-Token 头（常数时间比较）。
+	// 只允许在 ListenAndServe 之前设置（启动后只读，无锁）。
+	token       string
+	rateLimiter *ctrlRateLimiter
 
 	remoteMu          sync.Mutex
 	remoteAddr        string // 发送端地址（IP:port），接收端拉取其 TX 统计
@@ -82,7 +88,17 @@ func New(ctrls map[controller.Mode]*controller.Controller, cfgPaths map[controll
 		remoteControl: remoteControl,
 		receivers:     map[string]*receiverInfo{},
 		clockEst:      NewClockEstimator(32),
+		rateLimiter:   newCtrlRateLimiter(ctrlRateLimit, ctrlRateWindow),
 	}
+}
+
+// SetToken 设置控制面访问令牌（v2.10.0）：非空时所有控制类端点（含带 remote
+// 标记的机器间同步通知）都必须携带匹配的 X-Auth-Token 头。
+// 双机同步场景两端用同一 token：发送端发通知时自动带上本端 token，
+// 接收端 token 为空则不校验（旧版兼容）。
+// 只允许在 ListenAndServe 之前调用。
+func (s *Server) SetToken(tok string) {
+	s.token = strings.TrimSpace(tok)
 }
 
 // ctrl 返回指定角色的控制器（CLI 单实例模式下返回唯一实例）。
@@ -110,6 +126,24 @@ func (s *Server) SetRemote(addr string) {
 
 // ListenAndServe 启动 HTTP 服务（addr 如 "127.0.0.1:16666"）。
 func (s *Server) ListenAndServe(addr string) error {
+	s.srv = &http.Server{
+		Addr:              addr,
+		Handler:           s.routes(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	if _, p, err := net.SplitHostPort(addr); err == nil {
+		s.port.Store(p)
+	} else {
+		s.port.Store("16666")
+	}
+	return s.srv.ListenAndServe()
+}
+
+// routes 注册全部路由（独立方法便于测试直连 handler）。
+func (s *Server) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/status", s.handleStatus)
@@ -124,21 +158,10 @@ func (s *Server) ListenAndServe(addr string) error {
 	mux.HandleFunc("/api/tx_stats", s.handleTxStats)
 	mux.HandleFunc("/api/time", s.handleTime)
 	mux.HandleFunc("/api/report", s.handleReport)
+	mux.HandleFunc("/api/rates", s.handleRates)
+	mux.HandleFunc("/metrics", s.handleMetrics)
 	mux.HandleFunc("/", s.handleIndex)
-	s.srv = &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       60 * time.Second,
-	}
-	if _, p, err := net.SplitHostPort(addr); err == nil {
-		s.port.Store(p)
-	} else {
-		s.port.Store("16666")
-	}
-	return s.srv.ListenAndServe()
+	return mux
 }
 
 // Shutdown 优雅停止 HTTP 服务。
@@ -159,12 +182,14 @@ type apiIface struct {
 }
 
 type apiStats struct {
-	Now       int64           `json:"now"`
-	Running   bool            `json:"running"`
-	Flows     []apiFlow       `json:"flows"`
-	History   apiHistory      `json:"history"`
-	Remote    *remoteSnapshot `json:"remote,omitempty"`
-	IfaceStat *ifaceStat      `json:"iface_stat,omitempty"` // 接口级抓包统计（诊断用）
+	Now        int64           `json:"now"`
+	Running    bool            `json:"running"`
+	LiveScale  float64         `json:"live_scale"`            // 当前动态调速倍率（v2.10.0，1=配置基准）
+	StopReason string          `json:"stop_reason,omitempty"` // 自动停止原因（v2.10.0）
+	Flows      []apiFlow       `json:"flows"`
+	History    apiHistory      `json:"history"`
+	Remote     *remoteSnapshot `json:"remote,omitempty"`
+	IfaceStat  *ifaceStat      `json:"iface_stat,omitempty"` // 接口级抓包统计（诊断用）
 }
 
 // ifaceStat 是接口级抓包统计的 API 结构。
@@ -196,36 +221,36 @@ type apiFlow struct {
 	Reordered uint64  `json:"reordered"` // 乱序到达包数（v2.9.0，不含孔内重复包）
 
 	// v2.7.0：时延/抖动与阈值判定（delay_valid=false 表示发送端无时间戳）
-	DelayValid   bool    `json:"delay_valid"`
-	DelayAvgMs   float64 `json:"delay_avg_ms"`
+	DelayValid    bool    `json:"delay_valid"`
+	DelayAvgMs    float64 `json:"delay_avg_ms"`
 	DelayTotAvgMs float64 `json:"delay_tot_avg_ms"`
-	DelayMinMs   float64 `json:"delay_min_ms"`
-	DelayMaxMs   float64 `json:"delay_max_ms"`
-	JitterMs     float64 `json:"jitter_ms"`
-	DelayP95Ms   float64 `json:"delay_p95_ms"` // v2.8.0 全程 p95（毫秒）
-	DelayP99Ms   float64 `json:"delay_p99_ms"` // v2.8.0 全程 p99（毫秒）
+	DelayMinMs    float64 `json:"delay_min_ms"`
+	DelayMaxMs    float64 `json:"delay_max_ms"`
+	JitterMs      float64 `json:"jitter_ms"`
+	DelayP95Ms    float64 `json:"delay_p95_ms"`    // v2.8.0 全程 p95（毫秒）
+	DelayP99Ms    float64 `json:"delay_p99_ms"`    // v2.8.0 全程 p99（毫秒）
 	ClockOffsetMs float64 `json:"clock_offset_ms"` // v2.8.1 时钟偏差估计（毫秒，min raw 差值）
-	Verdict      string  `json:"verdict"` // "pass"/"fail"/""（未配置阈值）
+	Verdict       string  `json:"verdict"`         // "pass"/"fail"/""（未配置阈值）
 }
 
 type apiHistory struct {
-	T  []int64     `json:"t"`
-	Tx [][]float64 `json:"tx"`
-	Rx [][]float64 `json:"rx"`
+	T   []int64     `json:"t"`
+	Tx  [][]float64 `json:"tx"`
+	Rx  [][]float64 `json:"rx"`
 	Dly [][]float64 `json:"dly"` // v2.7.0 每流窗口平均时延 ms（无效=-1）
 }
 
 type apiConfigFlow struct {
-	Name        string  `json:"name"`
-	Protocol    string  `json:"protocol"`
-	SrcIP       string  `json:"src_ip"`
-	DstIP       string  `json:"dst_ip"`
-	SrcPort     int     `json:"src_port"`
-	DstPort     int     `json:"dst_port"`
-	DSCP        string  `json:"dscp"` // 数字或名字
-	RateMbps    float64 `json:"rate_mbps"`
-	RatePPS     float64 `json:"rate_pps"`
-	IPLen       int     `json:"ip_len"` // IP 包总长
+	Name     string  `json:"name"`
+	Protocol string  `json:"protocol"`
+	SrcIP    string  `json:"src_ip"`
+	DstIP    string  `json:"dst_ip"`
+	SrcPort  int     `json:"src_port"`
+	DstPort  int     `json:"dst_port"`
+	DSCP     string  `json:"dscp"` // 数字或名字
+	RateMbps float64 `json:"rate_mbps"`
+	RatePPS  float64 `json:"rate_pps"`
+	IPLen    int     `json:"ip_len"` // IP 包总长
 
 	// v2.7.0 阈值判定（0=不判定）
 	MaxLossRatePct float64 `json:"max_loss_rate_pct"`
@@ -235,6 +260,8 @@ type apiConfigFlow struct {
 
 type apiConfig struct {
 	Flows []apiConfigFlow `json:"flows"`
+	// 阈值越限自动停止（v2.10.0，全局秒数，0=禁用）
+	AutoStopSec float64 `json:"auto_stop_sec"`
 }
 
 // toConfig 把 API 配置转成内部配置并校验。
@@ -245,7 +272,7 @@ func (a *apiConfig) toConfig(requireRates bool) (*config.Config, error) {
 	if len(a.Flows) > 8 {
 		return nil, fmt.Errorf("最多支持 8 条流，当前 %d 条", len(a.Flows))
 	}
-	cfg := &config.Config{}
+	cfg := &config.Config{AutoStopSec: a.AutoStopSec}
 	for i, f := range a.Flows {
 		dscp, err := config.ParseDSCP(f.DSCP)
 		if err != nil {
@@ -255,10 +282,10 @@ func (a *apiConfig) toConfig(requireRates bool) (*config.Config, error) {
 			Name: f.Name, Protocol: f.Protocol,
 			SrcIP: f.SrcIP, DstIP: f.DstIP,
 			SrcPort: f.SrcPort, DstPort: f.DstPort,
-			DSCP:        config.DSCP(dscp),
-			RateMbps: f.RateMbps,
-			RatePPS:  f.RatePPS,
-			IPLen:    f.IPLen,
+			DSCP:           config.DSCP(dscp),
+			RateMbps:       f.RateMbps,
+			RatePPS:        f.RatePPS,
+			IPLen:          f.IPLen,
 			MaxLossRatePct: f.MaxLossRatePct,
 			MaxAvgDelayMs:  f.MaxAvgDelayMs,
 			MaxJitterMs:    f.MaxJitterMs,
@@ -275,16 +302,16 @@ func (a *apiConfig) toConfig(requireRates bool) (*config.Config, error) {
 }
 
 func (s *Server) configToAPI(cfg *config.Config) apiConfig {
-	out := apiConfig{Flows: make([]apiConfigFlow, len(cfg.Flows))}
+	out := apiConfig{Flows: make([]apiConfigFlow, len(cfg.Flows)), AutoStopSec: cfg.AutoStopSec}
 	for i, f := range cfg.Flows {
 		out.Flows[i] = apiConfigFlow{
 			Name: f.Name, Protocol: f.Protocol,
 			SrcIP: f.SrcIP, DstIP: f.DstIP,
 			SrcPort: f.SrcPort, DstPort: f.DstPort,
-			DSCP:        dscpDisplay(f.DSCP),
-			RateMbps: f.RateMbps,
-			RatePPS:  f.RatePPS,
-			IPLen:    f.IPLen,
+			DSCP:           dscpDisplay(f.DSCP),
+			RateMbps:       f.RateMbps,
+			RatePPS:        f.RatePPS,
+			IPLen:          f.IPLen,
 			MaxLossRatePct: f.MaxLossRatePct,
 			MaxAvgDelayMs:  f.MaxAvgDelayMs,
 			MaxJitterMs:    f.MaxJitterMs,
@@ -322,10 +349,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	cfg := ctrl.Config()
 	status := ctrl.Status()
 	out := apiStats{
-		Now:     now.UnixMilli(),
-		Running: status.Running,
-		Flows:   make([]apiFlow, 0, len(cfg.Flows)),
-		History: apiHistory{T: []int64{}, Tx: [][]float64{}, Rx: [][]float64{}},
+		Now:        now.UnixMilli(),
+		Running:    status.Running,
+		LiveScale:  status.LiveScale,
+		StopReason: status.StopReason,
+		Flows:      make([]apiFlow, 0, len(cfg.Flows)),
+		History:    apiHistory{T: []int64{}, Tx: [][]float64{}, Rx: [][]float64{}},
 	}
 	if agg != nil {
 		snap := agg.Current(now)
@@ -359,7 +388,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 				DelayMinMs: sf.DelayMinMs, DelayMaxMs: sf.DelayMaxMs, JitterMs: sf.JitterMs,
 				DelayP95Ms: sf.DelayP95Ms, DelayP99Ms: sf.DelayP99Ms,
 				ClockOffsetMs: sf.ClockOffsetMs,
-				Verdict: v,
+				Verdict:       v,
 			}
 		}
 	}
@@ -388,7 +417,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		Iface      string    `json:"iface"`
 		Started    time.Time `json:"started"`
 		LogFile    string    `json:"log_file"`
-		ReportFile string    `json:"report_file"` // v2.7.0 最近一次 HTML 报告路径
+		ReportFile string    `json:"report_file"`           // v2.7.0 最近一次 HTML 报告路径
+		LiveScale  float64   `json:"live_scale"`            // v2.10.0 当前动态调速倍率
+		StopReason string    `json:"stop_reason,omitempty"` // v2.10.0 自动停止原因
 	}
 	out := struct {
 		Send          roleStatus `json:"send"`
@@ -402,7 +433,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, m := range []controller.Mode{controller.ModeSend, controller.ModeRecv, controller.ModeBidir} {
 		st := s.ctrl(m).Status()
-		rs := roleStatus{Running: st.Running, Iface: st.Iface, Started: st.Started, LogFile: st.LogFile, ReportFile: st.ReportFile}
+		rs := roleStatus{Running: st.Running, Iface: st.Iface, Started: st.Started, LogFile: st.LogFile,
+			ReportFile: st.ReportFile, LiveScale: st.LiveScale, StopReason: st.StopReason}
 		switch m {
 		case controller.ModeSend:
 			out.Send = rs
@@ -435,6 +467,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet, http.MethodHead:
 		writeJSON(w, s.configToAPI(ctrl.Config()))
 	case http.MethodPost:
+		if !s.checkControlGate(w, r) {
+			return
+		}
 		if !s.requireControl(w, r) {
 			return
 		}
@@ -474,7 +509,11 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if !s.requireControl(w, r) {
+	// v2.10.0 门禁：限流 + token。注意这里不做页面控制权检查——
+	// 带 remote 标记的机器间同步通知必须能到达 CLI 只读模式的接收端
+	//（页面控制权在下方 decodeJSON 之后按 in.Remote 区分，v2.9.0 及之前
+	// 此处多出的一次 requireControl 会让 CLI 双机同步启动被 403 拒绝）
+	if !s.checkControlGate(w, r) {
 		return
 	}
 	var in struct {
@@ -528,7 +567,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		s.receiversMu.Unlock()
 		// 推送监听命令到勾选的接收端
 		for _, addr := range in.Receivers {
-			if msg := NotifyPeerListen(addr); msg != "" {
+			if msg := NotifyPeerListen(addr, s.token); msg != "" {
 				notifyMsgs = append(notifyMsgs, addr+": "+msg)
 			}
 		}
@@ -562,6 +601,10 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// v2.10.0 门禁：限流 + token（remote 机器间通知同样受限流/token 约束）
+	if !s.checkControlGate(w, r) {
+		return
+	}
 	var in struct {
 		Mode   string `json:"mode"`
 		Remote bool   `json:"remote"` // 接收端被发送端同步通知停止（v2.8.1）：延迟排空在途包
@@ -589,7 +632,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 			nwg.Add(1)
 			go func(addr string) {
 				defer nwg.Done()
-				if msg := NotifyPeerStop(addr); msg != "" {
+				if msg := NotifyPeerStop(addr, s.token); msg != "" {
 					log.Printf("[web] 通知接收端 %s 停止失败: %s", addr, msg)
 				}
 			}(addr)
@@ -641,26 +684,16 @@ func validPeerAddr(addr string) bool {
 }
 
 // NotifyPeerStop 通知远端接收端停止监听（发送端停止时同步，v2.8.1）。
+// token 非空时随请求携带 X-Auth-Token（对端配置了 token 时必须匹配，v2.10.0）。
 // 返回错误信息（空串=成功或未设置地址）；失败不阻塞，但调用方可在日志中提示。
-func NotifyPeerStop(addr string) string {
+func NotifyPeerStop(addr, token string) string {
 	if addr == "" {
 		return ""
 	}
 	if !validPeerAddr(addr) {
 		return "接收端地址非法: " + addr
 	}
-	body := strings.NewReader(`{"mode":"recv","remote":true}`)
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Post("http://"+addr+"/api/stop", "application/json", body)
-	if err != nil {
-		return "无法连接接收端 " + addr + ": " + err.Error()
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
-		return "接收端拒绝: " + string(b)
-	}
-	return ""
+	return postPeerControl(addr+"/api/stop", `{"mode":"recv","remote":true}`, token)
 }
 
 // NotifyAllReceiversStop 通知所有在线接收端停止监听（CLI 发送端退出时用，v2.8.1）。
@@ -675,7 +708,7 @@ func (s *Server) NotifyAllReceiversStop() {
 	}
 	s.receiversMu.Unlock()
 	for _, addr := range addrs {
-		if msg := NotifyPeerStop(addr); msg != "" {
+		if msg := NotifyPeerStop(addr, s.token); msg != "" {
 			log.Printf("[web] 通知接收端 %s 停止失败: %s", addr, msg)
 		}
 	}
@@ -698,6 +731,9 @@ func (s *Server) handleMode(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleIfaceSel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkControlGate(w, r) {
 		return
 	}
 	if !s.requireControl(w, r) {
@@ -815,29 +851,43 @@ func (s *Server) NotifyAllReceivers() {
 	}
 	s.receiversMu.Unlock()
 	for _, addr := range addrs {
-		NotifyPeerListen(addr)
+		NotifyPeerListen(addr, s.token)
 	}
 }
 
 // NotifyPeerListen 通知接收端开始监听。
+// token 非空时随请求携带 X-Auth-Token（对端配置了 token 时必须匹配，v2.10.0）。
 // 返回错误信息（空串=成功或未设置地址）；失败不阻塞发送，但调用方可提示用户。
-func NotifyPeerListen(addr string) string {
+func NotifyPeerListen(addr, token string) string {
 	if addr == "" {
 		return ""
 	}
 	if !validPeerAddr(addr) {
 		return "接收端地址非法: " + addr
 	}
-	body := strings.NewReader(`{"mode":"recv","remote":true}`)
-	client := &http.Client{Timeout: 3 * time.Second}
-	resp, err := client.Post("http://"+addr+"/api/start", "application/json", body)
+	return postPeerControl(addr+"/api/start", `{"mode":"recv","remote":true}`, token)
+}
+
+// postPeerControl 向对端控制端点发 JSON POST（机器间同步通知共用）：
+// 地址已在调用方校验为 host:port；响应读取有 300B 上限（防异常对端超大 body）。
+func postPeerControl(addrPath, body, token string) string {
+	req, err := http.NewRequest(http.MethodPost, "http://"+addrPath, strings.NewReader(body))
 	if err != nil {
-		return "无法连接接收端 " + addr + ": " + err.Error()
+		return "构造请求失败: " + err.Error()
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("X-Auth-Token", token)
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "无法连接对端 " + addrPath + ": " + err.Error()
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
-		return "接收端拒绝: " + string(b)
+		return "对端拒绝: " + string(b)
 	}
 	return ""
 }
@@ -876,6 +926,9 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !s.checkControlGate(w, r) {
+		return
+	}
 	if !s.requireControl(w, r) {
 		return
 	}
@@ -896,11 +949,47 @@ func (s *Server) handleReport(w http.ResponseWriter, r *http.Request) {
 	}{OK: true, Path: path})
 }
 
+// handleRates 运行中动态调速（v2.10.0）：按倍率缩放全部流的速率，
+// 不重启测试、累计统计不丢失。倍率相对当前配置速率（1.0=基准）。
+// 页面控制类端点：需控制权（CLI 只读模式不可用），走限流+token 门禁。
+func (s *Server) handleRates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkControlGate(w, r) {
+		return
+	}
+	if !s.requireControl(w, r) {
+		return
+	}
+	var in struct {
+		Mode  string  `json:"mode"`
+		Scale float64 `json:"scale"`
+	}
+	if !decodeJSON(w, r, &in) {
+		return
+	}
+	applied, err := s.ctrl(modeFromString(in.Mode)).ScaleRates(in.Scale)
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, struct {
+		OK      bool    `json:"ok"`
+		Scale   float64 `json:"scale"`
+		Message string  `json:"message"`
+	}{OK: true, Scale: applied, Message: fmt.Sprintf("已按 %.2fx 调整全部流速率", applied)})
+}
+
 // handleRemote 设置发送端地址（接收端拉取其 TX 统计并统一显示）。
 // 空地址清除。
 func (s *Server) handleRemote(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkControlGate(w, r) {
 		return
 	}
 	if !s.requireControl(w, r) {
@@ -976,7 +1065,7 @@ func (s *Server) remoteLoopOnce() {
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusOK {
 		var out struct {
-			Running bool     `json:"running"`
+			Running bool      `json:"running"`
 			TxBps   []float64 `json:"tx_bps"`
 			TxPps   []float64 `json:"tx_pps"`
 			TxPkts  []uint64  `json:"tx_packets"`
@@ -1087,7 +1176,7 @@ func (s *Server) handleTxStats(w http.ResponseWriter, r *http.Request) {
 		TxPkts  []uint64  `json:"tx_packets"`
 		TxBytes []uint64  `json:"tx_bytes"`
 	}{
-		TxBps:   []float64{}, TxPps: []float64{}, TxPkts: []uint64{}, TxBytes: []uint64{},
+		TxBps: []float64{}, TxPps: []float64{}, TxPkts: []uint64{}, TxBytes: []uint64{},
 	}
 	if ctrl != nil {
 		out.Running = ctrl.Status().Running

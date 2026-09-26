@@ -80,10 +80,10 @@ func TestValidPeerAddr(t *testing.T) {
 // TestNotifyPeerBadAddr 非法地址直接返回错误信息，不发起网络请求。
 func TestNotifyPeerBadAddr(t *testing.T) {
 	for _, addr := range []string{"http://evil/x", "1.2.3.4:abc"} {
-		if msg := NotifyPeerListen(addr); msg == "" {
+		if msg := NotifyPeerListen(addr, ""); msg == "" {
 			t.Fatalf("%q: 期望返回错误信息", addr)
 		}
-		if msg := NotifyPeerStop(addr); msg == "" {
+		if msg := NotifyPeerStop(addr, ""); msg == "" {
 			t.Fatalf("%q: 期望返回错误信息", addr)
 		}
 	}
@@ -122,6 +122,9 @@ func TestLastIfaceRace(t *testing.T) {
 	}, map[controller.Mode]string{}, true)
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
+	// 本测试高频调用控制端点以触发竞态检测：关闭限流（否则 429 拦截后
+	// 大部分请求到不了 lastIface 读写路径）
+	s.rateLimiter = newCtrlRateLimiter(1<<30, time.Hour)
 	for w := 0; w < 2; w++ {
 		wg.Add(1)
 		go func() {

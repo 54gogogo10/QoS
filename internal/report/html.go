@@ -14,11 +14,12 @@ import (
 
 // ReportMeta 是 HTML 报告的测试元信息。
 type ReportMeta struct {
-	Started  time.Time
-	Stopped  time.Time
-	Iface    string
-	Mode     string
-	Version  string
+	Started        time.Time
+	Stopped        time.Time
+	Iface          string
+	Mode           string
+	Version        string
+	AutoStopReason string // 阈值越限自动停止原因（v2.10.0，空=非自动停止）
 }
 
 // HTMLReport 生成自包含（内联 CSS）的测试报告到 destDir，
@@ -165,6 +166,7 @@ func HTMLReport(cfg *config.Config, snap []stats.FlowSnapshot, verdicts []Verdic
   <tr><td>结束</td><td>{{.Stopped}}</td></tr>
   <tr><td>时长</td><td>{{.Duration}}</td></tr>
   {{if .ClockOffset}}<tr><td>时钟偏差估计</td><td>{{.ClockOffset}}</td></tr>{{end}}
+  {{if .AutoStop}}<tr><td>自动停止</td><td>{{.AutoStop}}</td></tr>{{end}}
 </table>
 <h2>结论：{{.Conclusion}} {{.VerdictText}}</h2>
 <table>
@@ -198,16 +200,17 @@ func HTMLReport(cfg *config.Config, snap []stats.FlowSnapshot, verdicts []Verdic
 	}
 	data := struct {
 		Version, Mode, Iface, Started, Stopped, Duration string
-		Conclusion, VerdictText                           string
-		ClockOffset                                       string
-		Rows                                              []row
-		Hists                                             []histFlow
+		Conclusion, VerdictText                          string
+		ClockOffset                                      string
+		AutoStop                                         string
+		Rows                                             []row
+		Hists                                            []histFlow
 	}{
 		Version: meta.Version, Mode: meta.Mode, Iface: meta.Iface,
-		Started: meta.Started.Format("2006-01-02 15:04:05"),
-		Stopped: meta.Stopped.Format("2006-01-02 15:04:05"),
+		Started:  meta.Started.Format("2006-01-02 15:04:05"),
+		Stopped:  meta.Stopped.Format("2006-01-02 15:04:05"),
 		Duration: dur.String(), Conclusion: conclusion, VerdictText: verdictText,
-		ClockOffset: clockOffset, Rows: rows, Hists: hists,
+		ClockOffset: clockOffset, AutoStop: meta.AutoStopReason, Rows: rows, Hists: hists,
 	}
 	t, err := template.New("report").Parse(tmpl)
 	if err != nil {

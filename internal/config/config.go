@@ -10,16 +10,16 @@ import (
 
 // Flow 描述一条测试流。
 type Flow struct {
-	Name        string  `yaml:"name"`
-	Protocol    string  `yaml:"protocol"`
-	SrcIP       string  `yaml:"src_ip"`
-	DstIP       string  `yaml:"dst_ip"`
-	SrcPort     int     `yaml:"src_port"`
-	DstPort     int     `yaml:"dst_port"`
-	DSCP        DSCP    `yaml:"dscp"`
-	RateMbps    float64 `yaml:"rate_mbps,omitempty"`
-	RatePPS     float64 `yaml:"rate_pps,omitempty"`
-	IPLen       int     `yaml:"ip_len,omitempty"` // IP 包总长（IP 头+UDP 头+载荷）
+	Name     string  `yaml:"name"`
+	Protocol string  `yaml:"protocol"`
+	SrcIP    string  `yaml:"src_ip"`
+	DstIP    string  `yaml:"dst_ip"`
+	SrcPort  int     `yaml:"src_port"`
+	DstPort  int     `yaml:"dst_port"`
+	DSCP     DSCP    `yaml:"dscp"`
+	RateMbps float64 `yaml:"rate_mbps,omitempty"`
+	RatePPS  float64 `yaml:"rate_pps,omitempty"`
+	IPLen    int     `yaml:"ip_len,omitempty"` // IP 包总长（IP 头+UDP 头+载荷）
 
 	// 阈值判定（v2.7.0）：0/缺省 = 不判定
 	MaxLossRatePct float64 `yaml:"max_loss_rate_pct,omitempty"` // 丢包率阈值 %
@@ -30,6 +30,10 @@ type Flow struct {
 // Config 是一份完整配置，收发两端共用同一份。
 type Config struct {
 	Flows []Flow `yaml:"flows"`
+
+	// 阈值越限自动停止（v2.10.0，全局，0/缺省=禁用）：任一已配置阈值的流
+	// 在实时口径下持续越限该时长（秒）后自动停止测试并生成报告。
+	AutoStopSec float64 `yaml:"auto_stop_sec,omitempty"`
 }
 
 // Save 把配置写回 YAML 文件。
@@ -51,7 +55,7 @@ func DefaultConfig() *Config {
 		pps   float64
 		ipLen int
 	}{
-		{"语音-EF", 46, 2, 0, 188},    // 原 160 载荷 + 28 IP/UDP 头
+		{"语音-EF", 46, 2, 0, 188}, // 原 160 载荷 + 28 IP/UDP 头
 		{"视频-AF41", 34, 8, 0, 1228},
 		{"交互-AF31", 26, 4, 0, 540},
 		{"批量-AF21", 18, 10, 0, 1052},
@@ -106,10 +110,18 @@ func (c *Config) validate(requireRates bool) error {
 	if len(c.Flows) > 8 {
 		return fmt.Errorf("最多支持 8 条流，当前 %d 条", len(c.Flows))
 	}
+	if c.AutoStopSec < 0 || c.AutoStopSec > 2592000 {
+		return fmt.Errorf("auto_stop_sec 必须在 0-2592000（30 天），当前 %v", c.AutoStopSec)
+	}
 	for i := range c.Flows {
 		f := &c.Flows[i]
 		if f.Name == "" {
 			f.Name = fmt.Sprintf("flow-%d", i+1)
+		}
+		// 流名长度上限（v2.10.0）：流名会进入终端表格/Web/HTML/CSV/metrics 标签，
+		// 无上限的超长名可被控制 API（1MB body）注入并放大输出
+		if len(f.Name) > 128 {
+			return fmt.Errorf("flow %d: name 超过 128 字节上限", i+1)
 		}
 		if f.Protocol != "udp" {
 			return fmt.Errorf("flow %d (%s): 仅支持 udp 协议", i+1, f.Name)

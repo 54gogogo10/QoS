@@ -137,11 +137,20 @@ type RateSpec struct {
 	RatePPS  float64
 }
 
-// SetRates 批量更新每流速率并重算 pacing（阶梯扫描用）。
-// seq 与 socket 不中断；len(rates) 必须等于流数。
+// SetRates 批量更新每流速率并重算 pacing（阶梯扫描/运行中动态调速用）。
+// seq 与 socket 不中断；len(rates) 必须等于流数；速率不能为负
+// （0/0 视为非法——computePacing 会把空速率钳成 1pps，静默发出意外流量）。
 func (s *Sender) SetRates(rates []RateSpec) error {
 	if len(rates) != len(s.flows) {
 		return fmt.Errorf("速率数量 %d 与流数 %d 不符", len(rates), len(s.flows))
+	}
+	for i, r := range rates {
+		if r.RateMbps < 0 || r.RatePPS < 0 {
+			return fmt.Errorf("flow %d: 速率不能为负（mbps=%v pps=%v）", i+1, r.RateMbps, r.RatePPS)
+		}
+		if r.RateMbps == 0 && r.RatePPS == 0 {
+			return fmt.Errorf("flow %d: rate_mbps 与 rate_pps 至少一个大于 0", i+1)
+		}
 	}
 	for i, f := range s.flows {
 		f.cfgCfg.RateMbps = rates[i].RateMbps

@@ -135,4 +135,17 @@ func TestSetRatesChangesPacing(t *testing.T) {
 	if err := s.SetRates([]RateSpec{}); err == nil {
 		t.Fatal("长度不符应报错")
 	}
+	// v2.10.0：非法速率校验——负值与 0/0 拒绝（0/0 会被 computePacing 钳成 1pps）
+	if err := s.SetRates([]RateSpec{{RateMbps: -1, RatePPS: 0}}); err == nil {
+		t.Fatal("负 Mbps 应报错")
+	}
+	if err := s.SetRates([]RateSpec{{RateMbps: 0, RatePPS: -5}}); err == nil {
+		t.Fatal("负 pps 应报错")
+	}
+	if err := s.SetRates([]RateSpec{{RateMbps: 0, RatePPS: 0}}); err == nil {
+		t.Fatal("0/0 应报错（会退化为 1pps）")
+	}
+	if err := s.SetRates([]RateSpec{{RateMbps: 1, RatePPS: 0}}); err != nil {
+		t.Fatalf("合法速率不应报错: %v", err)
+	}
 }
