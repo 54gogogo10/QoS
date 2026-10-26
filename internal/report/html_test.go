@@ -17,7 +17,7 @@ func TestHTMLReport(t *testing.T) {
 	snap := testSnap(1e6, 1e6, 1000, 990, 10) // 1% 丢包 → FAIL
 	vs := Verdicts(cfg, snap, true)
 	meta := ReportMeta{Started: time.Now().Add(-time.Minute), Stopped: time.Now(), Iface: "eth0", Mode: "bidir", Version: "v2.8.1"}
-	path, err := HTMLReport(cfg, snap, vs, meta, dir, true, nil)
+	path, err := HTMLReport(cfg, snap, vs, meta, dir, true, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestHTMLReportAllPass(t *testing.T) {
 	cfg := testCfg()
 	snap := testSnap(1e6, 1e6, 1000, 1000, 0)
 	vs := Verdicts(cfg, snap, true)
-	path, err := HTMLReport(cfg, snap, vs, ReportMeta{}, dir, true, nil)
+	path, err := HTMLReport(cfg, snap, vs, ReportMeta{}, dir, true, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,7 +63,7 @@ func TestHTMLReportTailDiff(t *testing.T) {
 	if !vs[0].Checked || vs[0].Pass {
 		t.Fatalf("10%% 尾部差应 FAIL: %+v", vs[0])
 	}
-	path, err := HTMLReport(cfg, snap, vs, ReportMeta{}, dir, true, nil)
+	path, err := HTMLReport(cfg, snap, vs, ReportMeta{}, dir, true, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestHTMLReportTailDiff(t *testing.T) {
 		t.Fatalf("丢包率列应含尾部差（10.00%%）: %s", s)
 	}
 	// withTailDiff=false（recv 角色）：只显示 seq 空洞丢包（0.00%）
-	path2, err := HTMLReport(cfg, snap, vs, ReportMeta{}, dir, false, nil)
+	path2, err := HTMLReport(cfg, snap, vs, ReportMeta{}, dir, false, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +89,7 @@ func TestHTMLReportShortSnap(t *testing.T) {
 	cfg.Flows = append(cfg.Flows, cfg.Flows[0])
 	snap := testSnap(1e6, 1e6, 100, 100, 0)
 	vs := Verdicts(cfg, snap, true)
-	if _, err := HTMLReport(cfg, snap, vs, ReportMeta{}, t.TempDir(), true, nil); err != nil {
+	if _, err := HTMLReport(cfg, snap, vs, ReportMeta{}, t.TempDir(), true, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -100,7 +100,7 @@ func TestHTMLReportReorderColumn(t *testing.T) {
 	snap := testSnap(1e6, 1e6, 1000, 990, 10)
 	snap[0].Reordered = 7
 	vs := Verdicts(cfg, snap, true)
-	path, err := HTMLReport(cfg, snap, vs, ReportMeta{}, t.TempDir(), true, nil)
+	path, err := HTMLReport(cfg, snap, vs, ReportMeta{}, t.TempDir(), true, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestHTMLReportDelayHist(t *testing.T) {
 	hist := make([][]uint64, 1)
 	hist[0] = make([]uint64, 2001)
 	hist[0][0], hist[0][1], hist[0][2], hist[0][5] = 100, 200, 50, 10
-	path, err := HTMLReport(cfg, snap, vs, ReportMeta{}, t.TempDir(), true, hist)
+	path, err := HTMLReport(cfg, snap, vs, ReportMeta{}, t.TempDir(), true, nil, hist)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestHTMLReportDelayHist(t *testing.T) {
 		}
 	}
 	// 无直方图数据：不渲染分布节
-	path2, err := HTMLReport(cfg, snap, vs, ReportMeta{}, t.TempDir(), true, nil)
+	path2, err := HTMLReport(cfg, snap, vs, ReportMeta{}, t.TempDir(), true, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestHTMLReportDelayHist(t *testing.T) {
 	}
 	// DelayValid=false（旧发送端）：同样不渲染
 	snap[0].DelayValid = false
-	path3, err := HTMLReport(cfg, snap, vs, ReportMeta{}, t.TempDir(), true, hist)
+	path3, err := HTMLReport(cfg, snap, vs, ReportMeta{}, t.TempDir(), true, nil, hist)
 	if err != nil {
 		t.Fatal(err)
 	}

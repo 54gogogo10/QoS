@@ -72,6 +72,8 @@ func TestLoadErrors(t *testing.T) {
 		{"速率 Inf", "flows:\n  - name: a\n    protocol: udp\n    src_ip: 1.1.1.1\n    dst_ip: 2.2.2.2\n    src_port: 1\n    dst_port: 2\n    dscp: 0\n    rate_mbps: .inf\n"},
 		{"速率超上限", "flows:\n  - name: a\n    protocol: udp\n    src_ip: 1.1.1.1\n    dst_ip: 2.2.2.2\n    src_port: 1\n    dst_port: 2\n    dscp: 0\n    rate_mbps: 2000000\n"},
 		{"阈值 NaN", "flows:\n  - name: a\n    protocol: udp\n    src_ip: 1.1.1.1\n    dst_ip: 2.2.2.2\n    src_port: 1\n    dst_port: 2\n    dscp: 0\n    rate_pps: 100\n    max_loss_rate_pct: .nan\n"},
+		{"p95 阈值为负", "flows:\n  - name: a\n    protocol: udp\n    src_ip: 1.1.1.1\n    dst_ip: 2.2.2.2\n    src_port: 1\n    dst_port: 2\n    dscp: 0\n    rate_pps: 100\n    max_p95_delay_ms: -1\n"},
+		{"p99 阈值 NaN", "flows:\n  - name: a\n    protocol: udp\n    src_ip: 1.1.1.1\n    dst_ip: 2.2.2.2\n    src_port: 1\n    dst_port: 2\n    dscp: 0\n    rate_pps: 100\n    max_p99_delay_ms: .nan\n"},
 	}
 	for _, c := range cases {
 		if _, err := Load(writeTemp(t, c.yaml)); err == nil {
@@ -144,13 +146,17 @@ func TestValidateRecvNoRates(t *testing.T) {
 
 // TestThresholdFields 验证阈值字段的 yaml 往返与校验。
 func TestThresholdFields(t *testing.T) {
-	yaml := validYAML + "    max_loss_rate_pct: 0.5\n    max_avg_delay_ms: 50\n    max_jitter_ms: 10\n"
+	yaml := validYAML + "    max_loss_rate_pct: 0.5\n    max_avg_delay_ms: 50\n    max_jitter_ms: 10\n" +
+		"    max_p95_delay_ms: 20\n    max_p99_delay_ms: 50\n    max_reorder: 3\n"
 	cfg, err := Load(writeTemp(t, yaml))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Flows[1].MaxLossRatePct != 0.5 || cfg.Flows[1].MaxAvgDelayMs != 50 || cfg.Flows[1].MaxJitterMs != 10 {
 		t.Fatalf("阈值字段 = %+v", cfg.Flows[1])
+	}
+	if cfg.Flows[1].MaxP95DelayMs != 20 || cfg.Flows[1].MaxP99DelayMs != 50 || cfg.Flows[1].MaxReorder != 3 {
+		t.Fatalf("v2.11.0 阈值扩展字段 = %+v", cfg.Flows[1])
 	}
 	if cfg.Flows[0].MaxLossRatePct != 0 || cfg.Flows[0].MaxAvgDelayMs != 0 {
 		t.Fatalf("缺省应为 0: %+v", cfg.Flows[0])

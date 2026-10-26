@@ -17,7 +17,7 @@ Go 单模块（module `qostool`）。README.md 是按版本号累积的完整功
 - `config`：YAML 解析 + DSCP 名称/值映射
 - `sender`：发送与 DSCP 打标。平台文件：`qos2_windows`（qWave QOS2 API，失败回退 IP_TOS）、`dscp_unix`（IP_TOS/IPV6_TCLASS）、`sysconfig_windows`（注册表，管理员时自动改、退出恢复）、`timer_windows`
 - `capture`：抓包 + 解析 + 匹配。Linux 走 AF_PACKET（`capture_linux.go`），Windows 走 gopacket/cgo。parse/match 必须对畸形包安全（有 fuzz 测试）
-- `stats`：聚合器。丢包 = seq 空洞（乱序容忍：≤64 包跟踪 200ms）+ 尾部差；RFC3550 抖动；p95/p99 用 1ms 直方图；乱序包计数（v2.9.0：到达时 seq 已小于最大已见 seq，孔内重复不计）；`DelayHistogram()` 导出直方图快照供 HTML 报告分布图
+- `stats`：聚合器。丢包 = seq 空洞（乱序容忍：≤64 包跟踪 200ms）+ 尾部差；RFC3550 抖动；p95/p99 用 1ms 直方图；乱序包计数（v2.9.0：到达时 seq 已小于最大已见 seq，孔内重复不计）；`DelayHistogram()` 导出直方图快照供 HTML 报告分布图；`WorstWindows()` 导出 1/10/60s 滑动窗口最差丢包/时延（v2.11.0，秒聚合环形缓冲 1 小时）
 - `controller`：生命周期编排（启停/CSV/HTML 报告/时钟偏差 hint）。Start/Stop/UpdateConfig 并发安全
 - `sweep`：阶梯扫描引擎（仅 bidir 单机模式）
 - `report`：HTML 报告 + 阈值判定。退出码契约：0=通过/无阈值，1=有流未通过或运行错误，2=用法错误

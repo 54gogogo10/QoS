@@ -23,14 +23,14 @@ type FlowSnapshot struct {
 	Reordered uint64  // 乱序到达包数（v2.9.0：到达时 seq 已小于当前最大已见 seq，不含孔内重复包）
 
 	// 时延/抖动（v2.7.0）：DelayValid=false 表示发送端无时间戳（旧版本），其余字段为 0。
-	DelayValid   bool     // 是否收到过带时间戳的包
-	DelayAvgMs   float64  // 最近采样窗口（100ms）平均时延（毫秒）
+	DelayValid    bool    // 是否收到过带时间戳的包
+	DelayAvgMs    float64 // 最近采样窗口（100ms）平均时延（毫秒）
 	DelayTotAvgMs float64 // 全程累计平均时延（毫秒，报告/最终判定用）
-	DelayMinMs   float64 // 全程最小（毫秒，校正后）
-	DelayMaxMs   float64 // 全程最大（毫秒，校正后）
-	JitterMs     float64 // RFC3550 抖动（毫秒，累计）
-	DelayP95Ms   float64 // 全程 p95 时延（毫秒，v2.8.0，1ms 直方图桶下界精度）
-	DelayP99Ms   float64 // 全程 p99 时延（毫秒，v2.8.0）
+	DelayMinMs    float64 // 全程最小（毫秒，校正后）
+	DelayMaxMs    float64 // 全程最大（毫秒，校正后）
+	JitterMs      float64 // RFC3550 抖动（毫秒，累计）
+	DelayP95Ms    float64 // 全程 p95 时延（毫秒，v2.8.0，1ms 直方图桶下界精度）
+	DelayP99Ms    float64 // 全程 p99 时延（毫秒，v2.8.0）
 	ClockOffsetMs float64 // v2.8.1 估计的时钟偏差（毫秒）：未钳制差值的最小值；双机无同步时≈两机时钟差，单机≈最小时延
 }
 
@@ -77,10 +77,10 @@ type delayState struct {
 	delayMinNs int64 // 全程最小（ns，校正后）
 	delayMaxNs int64 // 全程最大（ns，校正后）
 	minRawNs   int64 // 未钳制差值的最小值（ns）：时钟偏差+最小时延的估计，用于校正
-	hintSet    bool   // 是否已注入外部时钟偏差估计（v2.8.1）
+	hintSet    bool  // 是否已注入外部时钟偏差估计（v2.8.1）
 	prevDelay  int64 // 上一包时延（ns，未校正）
 	prevSet    bool
-	jitterNs   float64 // RFC3550 抖动（ns）
+	jitterNs   float64                  // RFC3550 抖动（ns）
 	hist       [delayHistBuckets]uint64 // 全程时延直方图（v2.8.0，1ms 桶，末桶为溢出）
 
 	// 乱序孔洞（v2.8.0）：seq 空洞先跟踪不立即计丢包，宽限期内乱序包补齐则不计。
@@ -94,21 +94,141 @@ type delayState struct {
 
 const sampleWindow = time.Second
 
+// ---------- 滑动窗口最差统计（v2.11.0） ----------
+//
+// 采样循环每 100ms 调 Snapshot 时，把每流的 丢包/时延 增量按"自然秒"聚合进
+// 环形缓冲（容量 worstRingCap 秒 = 1 小时，超时覆盖最旧）。查询时对 1/10/60
+// 秒窗口取最差：丢包率 = 窗口内 lost/(rx+lost) 的最大值；时延 = 窗口平均时延
+// 的最大值。典型用途：验收条款"任一 1 秒窗口丢包率 ≤ 0.1%"——全程累计口径
+// 会把短时突发稀释，无法回答该问题。
+// 说明：采样循环每秒至少触发一次（100ms 间隔），未结束的当前秒与停止瞬间
+// 的最后不足 1 秒不参与统计；运行超过 1 小时后统计范围为最近 1 小时。
+
+// worstRingCap 秒聚合环形缓冲容量（1 小时）。
+const worstRingCap = 3600
+
+// 窗口最差统计的窗口长度（秒）。
+var worstWindowSizes = [3]int{1, 10, 60}
+
+// secBucket 是单条流在一个自然秒内的聚合。
+type secBucket struct {
+	rx, lost uint64 // 该秒接收/丢失包数（增量）
+	dlySumNs uint64 // 该秒时延和（ns，校正后）
+	dlyCnt   uint64 // 该秒时延样本数
+}
+
+// stats 返回该桶的丢包率 % 与平均时延 ms（无数据 = -1）。
+func (b secBucket) stats() (lossPct, delayMs float64) {
+	lossPct, delayMs = -1, -1
+	if e := b.rx + b.lost; e > 0 {
+		lossPct = float64(b.lost) / float64(e) * 100
+	}
+	if b.dlyCnt > 0 {
+		delayMs = float64(b.dlySumNs) / float64(b.dlyCnt) / 1e6
+	}
+	return
+}
+
+// worstState 是单条流的秒聚合环形缓冲。由 Aggregator.mu 保护。
+type worstState struct {
+	buf      [worstRingCap]secBucket
+	head, n  int   // head=下一写入位；n=已填充数（≤cap）
+	curSec   int64 // 当前累计中的自然秒（0=尚无）
+	cur      secBucket
+	lastRx   uint64 // 上次 Snapshot 的累计值（算增量用）
+	lastLost uint64
+}
+
+// accumulate 记录一次 Snapshot 的增量到当前秒桶；跨秒时把上一秒落盘。
+// rx/lost 传累计计数器，内部转增量（计数器回绕/重置时按 0 增量处理）。
+func (w *worstState) accumulate(sec int64, rx, lost, dlySumNs, dlyCnt uint64) {
+	if sec != w.curSec {
+		if w.curSec != 0 {
+			w.push(w.cur)
+		}
+		w.cur, w.curSec = secBucket{}, sec
+	}
+	if rx >= w.lastRx {
+		w.cur.rx += rx - w.lastRx
+	}
+	if lost >= w.lastLost {
+		w.cur.lost += lost - w.lastLost
+	}
+	w.lastRx, w.lastLost = rx, lost
+	w.cur.dlySumNs += dlySumNs
+	w.cur.dlyCnt += dlyCnt
+}
+
+// push 落盘一个完整秒桶（覆盖最旧）。
+func (w *worstState) push(b secBucket) {
+	w.buf[w.head] = b
+	w.head = (w.head + 1) % worstRingCap
+	if w.n < worstRingCap {
+		w.n++
+	}
+}
+
+// at 返回时间正序第 k 个桶（k=0 最旧）。
+func (w *worstState) at(k int) secBucket {
+	start := (w.head - w.n + worstRingCap) % worstRingCap
+	return w.buf[(start+k)%worstRingCap]
+}
+
+// query 计算 1/10/60 秒窗口的最差丢包率与最差窗口平均时延（无数据 = -1）。
+// 对每个窗口长度枚举全部连续切片取最差；n ≤ 3600，仅在报告时调用。
+func (w *worstState) query() (loss [3]float64, dly [3]float64) {
+	for i := range loss {
+		loss[i], dly[i] = -1, -1
+	}
+	if w.n == 0 {
+		return
+	}
+	prefix := make([]secBucket, w.n+1)
+	for k := 0; k < w.n; k++ {
+		b := w.at(k)
+		prefix[k+1] = secBucket{
+			rx: prefix[k].rx + b.rx, lost: prefix[k].lost + b.lost,
+			dlySumNs: prefix[k].dlySumNs + b.dlySumNs, dlyCnt: prefix[k].dlyCnt + b.dlyCnt,
+		}
+	}
+	for wi, size := range worstWindowSizes {
+		if w.n < size {
+			continue
+		}
+		for e := size; e <= w.n; e++ {
+			older, newer := prefix[e-size], prefix[e]
+			win := secBucket{
+				rx: newer.rx - older.rx, lost: newer.lost - older.lost,
+				dlySumNs: newer.dlySumNs - older.dlySumNs, dlyCnt: newer.dlyCnt - older.dlyCnt,
+			}
+			lp, dm := win.stats()
+			if lp >= 0 && (loss[wi] < 0 || lp > loss[wi]) {
+				loss[wi] = lp
+			}
+			if dm >= 0 && (dly[wi] < 0 || dm > dly[wi]) {
+				dly[wi] = dm
+			}
+		}
+	}
+	return
+}
+
 // Aggregator 汇总所有流的计数并计算实时速率。
 // 并发安全：RecordTx 多 goroutine；RecordRx 单 goroutine（抓包线程）；
 // Snapshot/Current/History 可并发。
 type Aggregator struct {
-	nFlows   int
-	txPkts   []atomic.Uint64
-	txB      []atomic.Uint64
-	rxPkts   []atomic.Uint64
-	rxB      []atomic.Uint64
-	lost     []atomic.Uint64
-	reorder  []atomic.Uint64 // 乱序到达包数（v2.9.0）
-	lastSeq  []atomic.Uint32
+	nFlows  int
+	txPkts  []atomic.Uint64
+	txB     []atomic.Uint64
+	rxPkts  []atomic.Uint64
+	rxB     []atomic.Uint64
+	lost    []atomic.Uint64
+	reorder []atomic.Uint64 // 乱序到达包数（v2.9.0）
+	lastSeq []atomic.Uint32
 
-	delay    []delayState
-	delayMu  []sync.Mutex // 每流一把：RecordRx（抓包线程）与 Snapshot/Current（采样线程）互斥
+	delay   []delayState
+	delayMu []sync.Mutex // 每流一把：RecordRx（抓包线程）与 Snapshot/Current（采样线程）互斥
+	worst   []worstState // 每流秒聚合环形缓冲（v2.11.0 窗口最差统计，mu 保护）
 
 	mu      sync.Mutex
 	samples []sample
@@ -129,6 +249,7 @@ func NewAggregator(nFlows, histCap int) *Aggregator {
 		lastSeq: make([]atomic.Uint32, nFlows),
 		delay:   make([]delayState, nFlows),
 		delayMu: make([]sync.Mutex, nFlows),
+		worst:   make([]worstState, nFlows),
 		hist: History{
 			TxB: make([][]float64, nFlows),
 			RxB: make([][]float64, nFlows),
@@ -299,8 +420,11 @@ func (a *Aggregator) Snapshot(now time.Time) []FlowSnapshot {
 		}
 	}
 	// 窗口清零：下一个采样窗口重新累计（锁序 a.mu → delayMu，与 RecordRx 无反向，无死锁）
+	// 同时把本窗口的增量聚合进秒桶（v2.11.0 窗口最差统计；须在清零前读取 win*）
 	for i := 0; i < a.nFlows; i++ {
 		a.delayMu[i].Lock()
+		a.worst[i].accumulate(now.Unix(), out[i].RxPackets, out[i].Lost,
+			a.delay[i].winSumNs, a.delay[i].winCount)
 		a.delay[i].winSumNs = 0
 		a.delay[i].winCount = 0
 		a.delayMu[i].Unlock()
@@ -445,6 +569,26 @@ func (a *Aggregator) DelayHistogram() [][]uint64 {
 			out[i] = h
 		}
 		a.delayMu[i].Unlock()
+	}
+	return out
+}
+
+// FlowWorst 是单条流的滑动窗口最差统计（v2.11.0）。
+// 索引 0/1/2 对应 1s/10s/60s 窗口；-1 = 无数据（窗口内无包或无时延样本）。
+type FlowWorst struct {
+	LossPct [3]float64 // 最差窗口丢包率 %
+	DelayMs [3]float64 // 最差窗口平均时延 ms
+}
+
+// WorstWindows 返回每流的 1/10/60 秒滑动窗口最差统计（v2.11.0）。
+// 只统计已完成的整秒（当前进行中的秒与停止瞬间不足 1 秒的尾部不计）；
+// 采样循环停止后结果不再变化。报告/汇总时调用，开销可忽略。
+func (a *Aggregator) WorstWindows() []FlowWorst {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]FlowWorst, a.nFlows)
+	for i := range out {
+		out[i].LossPct, out[i].DelayMs = a.worst[i].query()
 	}
 	return out
 }

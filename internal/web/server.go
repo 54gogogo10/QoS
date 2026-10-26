@@ -261,6 +261,11 @@ type apiConfigFlow struct {
 	MaxLossRatePct float64 `json:"max_loss_rate_pct"`
 	MaxAvgDelayMs  float64 `json:"max_avg_delay_ms"`
 	MaxJitterMs    float64 `json:"max_jitter_ms"`
+
+	// v2.11.0 阈值扩展（0=不判定）
+	MaxP95DelayMs float64 `json:"max_p95_delay_ms"`
+	MaxP99DelayMs float64 `json:"max_p99_delay_ms"`
+	MaxReorder    uint64  `json:"max_reorder"`
 }
 
 type apiConfig struct {
@@ -294,6 +299,9 @@ func (a *apiConfig) toConfig(requireRates bool) (*config.Config, error) {
 			MaxLossRatePct: f.MaxLossRatePct,
 			MaxAvgDelayMs:  f.MaxAvgDelayMs,
 			MaxJitterMs:    f.MaxJitterMs,
+			MaxP95DelayMs:  f.MaxP95DelayMs,
+			MaxP99DelayMs:  f.MaxP99DelayMs,
+			MaxReorder:     f.MaxReorder,
 		})
 	}
 	if requireRates {
@@ -320,6 +328,9 @@ func (s *Server) configToAPI(cfg *config.Config) apiConfig {
 			MaxLossRatePct: f.MaxLossRatePct,
 			MaxAvgDelayMs:  f.MaxAvgDelayMs,
 			MaxJitterMs:    f.MaxJitterMs,
+			MaxP95DelayMs:  f.MaxP95DelayMs,
+			MaxP99DelayMs:  f.MaxP99DelayMs,
+			MaxReorder:     f.MaxReorder,
 		}
 	}
 	return out

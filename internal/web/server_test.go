@@ -101,7 +101,8 @@ func TestAPIConfigRoundTrip(t *testing.T) {
 	}
 	// POST 修改配置（DSCP 用名字，验证解析）
 	body := `{"flows":[{"name":"新流","protocol":"udp","src_ip":"10.0.0.1","dst_ip":"10.0.0.2",
-		"src_port":1111,"dst_port":2222,"dscp":"AF41","rate_mbps":5,"rate_pps":0,"ip_len":128}]}`
+		"src_port":1111,"dst_port":2222,"dscp":"AF41","rate_mbps":5,"rate_pps":0,"ip_len":128,
+		"max_p95_delay_ms":20,"max_p99_delay_ms":50,"max_reorder":3}],"auto_stop_sec":15}`
 	rec2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest("POST", "/api/config", strings.NewReader(body))
 	req2.Header.Set("Content-Type", "application/json")
@@ -112,6 +113,23 @@ func TestAPIConfigRoundTrip(t *testing.T) {
 	cfg := s.ctrl(controller.ModeBidir).Config()
 	if len(cfg.Flows) != 1 || int(cfg.Flows[0].DSCP) != 34 || cfg.Flows[0].Name != "新流" {
 		t.Fatalf("配置未生效: %+v", cfg.Flows)
+	}
+	// v2.11.0：阈值扩展字段与全局 auto_stop_sec 往返
+	if cfg.Flows[0].MaxP95DelayMs != 20 || cfg.Flows[0].MaxP99DelayMs != 50 || cfg.Flows[0].MaxReorder != 3 {
+		t.Fatalf("阈值扩展字段未生效: %+v", cfg.Flows[0])
+	}
+	if cfg.AutoStopSec != 15 {
+		t.Fatalf("auto_stop_sec = %v, want 15", cfg.AutoStopSec)
+	}
+	// GET 回读：API 结构包含新字段
+	rec3 := httptest.NewRecorder()
+	s.handleConfig(rec3, httptest.NewRequest("GET", "/api/config", nil))
+	var out3 apiConfig
+	if err := json.Unmarshal(rec3.Body.Bytes(), &out3); err != nil {
+		t.Fatal(err)
+	}
+	if out3.Flows[0].MaxP95DelayMs != 20 || out3.Flows[0].MaxReorder != 3 || out3.AutoStopSec != 15 {
+		t.Fatalf("GET 回读缺失新字段: %+v", out3)
 	}
 }
 

@@ -183,7 +183,7 @@ func TestJSONSummaryFail(t *testing.T) {
 	cfg.Flows[0].MaxLossRatePct = 0.5
 	snap := testSnap(1e6, 1e6, 1000, 990, 10) // 1% 丢包 → FAIL
 	vs := Verdicts(cfg, snap, true)
-	b, err := JSONSummary(cfg, snap, vs, ReportMeta{
+	b, err := JSONSummary(cfg, snap, vs, nil, ReportMeta{
 		Started: time.Now().Add(-time.Minute), Stopped: time.Now(), Iface: "eth0", Mode: "bidir", Version: "v2.8.0",
 	}, true, "logs/x.html")
 	if err != nil {
@@ -203,7 +203,7 @@ func TestJSONSummaryPass(t *testing.T) {
 	cfg.Flows[0].MaxLossRatePct = 0.5
 	snap := testSnap(1e6, 1e6, 1000, 1000, 0)
 	vs := Verdicts(cfg, snap, true)
-	b, err := JSONSummary(cfg, snap, vs, ReportMeta{Started: time.Now(), Stopped: time.Now().Add(time.Minute)}, true, "")
+	b, err := JSONSummary(cfg, snap, vs, nil, ReportMeta{Started: time.Now(), Stopped: time.Now().Add(time.Minute)}, true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +222,7 @@ func TestJSONSummaryPass(t *testing.T) {
 func TestJSONSummaryNoThreshold(t *testing.T) {
 	snap := testSnap(1e6, 1e6, 1000, 900, 100)
 	vs := Verdicts(testCfg(), snap, true)
-	b, err := JSONSummary(testCfg(), snap, vs, ReportMeta{}, true, "")
+	b, err := JSONSummary(testCfg(), snap, vs, nil, ReportMeta{}, true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestJSONSummaryTailDiff(t *testing.T) {
 		FlowIdx: 0, TxPackets: 1000, TxBytes: 1e6,
 		RxPackets: 998, RxBytes: 998000, Lost: 0,
 	}}
-	b, err := JSONSummary(testCfg(), snap, nil, ReportMeta{}, true, "")
+	b, err := JSONSummary(testCfg(), snap, nil, nil, ReportMeta{}, true, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestJSONSummaryTailDiff(t *testing.T) {
 		t.Fatalf("JSON 尾部差口径错误:\n%s", s)
 	}
 	// 不计尾部差（recv 远端 TX）：lost 保持 seq 空洞 0
-	b2, _ := JSONSummary(testCfg(), snap, nil, ReportMeta{}, false, "")
+	b2, _ := JSONSummary(testCfg(), snap, nil, nil, ReportMeta{}, false, "")
 	if !strings.Contains(string(b2), `"lost": 0`) {
 		t.Fatalf("不计尾部差时 lost 应为 0:\n%s", string(b2))
 	}
@@ -261,7 +261,7 @@ func TestJSONSummaryDelayFields(t *testing.T) {
 	snap[0].DelayValid = true
 	snap[0].DelayTotAvgMs, snap[0].DelayP95Ms, snap[0].DelayP99Ms = 1.25, 2.5, 3.0
 	snap[0].DelayMinMs, snap[0].DelayMaxMs, snap[0].JitterMs = 0.8, 3.1, 0.42
-	b, err := JSONSummary(testCfg(), snap, nil, ReportMeta{}, true, "")
+	b, err := JSONSummary(testCfg(), snap, nil, nil, ReportMeta{}, true, "")
 	if err != nil {
 		t.Fatal(err)
 	}

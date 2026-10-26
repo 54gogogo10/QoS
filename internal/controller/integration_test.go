@@ -397,7 +397,7 @@ func TestIntegrationVerdictsAndJSON(t *testing.T) {
 	}
 
 	// JSON 汇总
-	b, err := report.JSONSummary(cfg, snap, vs, report.ReportMeta{
+	b, err := report.JSONSummary(cfg, snap, vs, nil, report.ReportMeta{
 		Started: time.Now().Add(-time.Minute), Stopped: time.Now(), Mode: "bidir", Version: "v2.8.1",
 	}, true, "logs/x.html")
 	if err != nil {

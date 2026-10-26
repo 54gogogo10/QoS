@@ -26,9 +26,11 @@ type ReportMeta struct {
 // 返回报告文件路径。文件名 qostool_report_<停止时间戳>.html。
 // withTailDiff 与文本汇总同语义：丢包/丢包率列是否计入停止瞬间尾部差
 // （bidir/send 为 true；recv 角色 TX 来自远端轮询快照，取 false）。
+// worst 为每流滑动窗口最差统计（v2.11.0，stats.WorstWindows()）：
+// 非空且有数据时报告附"窗口最差统计"节；nil 或全无数据时跳过。
 // delayHist 为每流全程时延直方图（stats.Aggregator.DelayHistogram()，v2.9.0）：
 // 非空时报告附每流时延分布图；流数不符或 nil 时跳过该节。
-func HTMLReport(cfg *config.Config, snap []stats.FlowSnapshot, verdicts []Verdict, meta ReportMeta, destDir string, withTailDiff bool, delayHist [][]uint64) (string, error) {
+func HTMLReport(cfg *config.Config, snap []stats.FlowSnapshot, verdicts []Verdict, meta ReportMeta, destDir string, withTailDiff bool, worst []stats.FlowWorst, delayHist [][]uint64) (string, error) {
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return "", err
 	}
@@ -122,6 +124,9 @@ func HTMLReport(cfg *config.Config, snap []stats.FlowSnapshot, verdicts []Verdic
 	// 时延分布（v2.9.0）：把 1ms 直方图聚合成 ≤40 个显示桶渲染纯 CSS 柱状图
 	hists := buildHistFlows(cfg, snap, delayHist)
 
+	// 窗口最差统计（v2.11.0）：1/10/60s 滑动窗口的最差丢包率与窗口平均时延
+	worstRows := buildWorstRows(cfg, worst)
+
 	conclusion := "全部通过"
 	verdictText := "（未配置阈值，仅记录）"
 	if failN > 0 {
@@ -176,6 +181,13 @@ func HTMLReport(cfg *config.Config, snap []stats.FlowSnapshot, verdicts []Verdic
   {{if .FailMsg}}<tr><td colspan="11" class="failmsg">违反: {{.FailMsg}}</td></tr>{{end}}
   {{end}}
 </table>
+{{if .WorstRows}}
+<h2 style="margin-top:16px">窗口最差统计（1s/10s/60s 滑动窗口 · 只含已完成整秒 · —=无数据）</h2>
+<table>
+  <tr><th>流</th><th>最差丢包% 1s</th><th>10s</th><th>60s</th><th>最差窗口时延ms 1s</th><th>10s</th><th>60s</th></tr>
+  {{range .WorstRows}}<tr><td>{{.Name}}</td><td>{{.L1}}</td><td>{{.L10}}</td><td>{{.L60}}</td><td>{{.D1}}</td><td>{{.D10}}</td><td>{{.D60}}</td></tr>{{end}}
+</table>
+{{end}}
 {{if .Hists}}
 <h2 style="margin-top:16px">时延分布（每流全程 · 1ms 精度直方图，柱高=桶内包数）</h2>
 {{range .Hists}}
@@ -204,13 +216,14 @@ func HTMLReport(cfg *config.Config, snap []stats.FlowSnapshot, verdicts []Verdic
 		ClockOffset                                      string
 		AutoStop                                         string
 		Rows                                             []row
+		WorstRows                                        []worstRow
 		Hists                                            []histFlow
 	}{
 		Version: meta.Version, Mode: meta.Mode, Iface: meta.Iface,
 		Started:  meta.Started.Format("2006-01-02 15:04:05"),
 		Stopped:  meta.Stopped.Format("2006-01-02 15:04:05"),
 		Duration: dur.String(), Conclusion: conclusion, VerdictText: verdictText,
-		ClockOffset: clockOffset, AutoStop: meta.AutoStopReason, Rows: rows, Hists: hists,
+		ClockOffset: clockOffset, AutoStop: meta.AutoStopReason, Rows: rows, WorstRows: worstRows, Hists: hists,
 	}
 	t, err := template.New("report").Parse(tmpl)
 	if err != nil {
@@ -225,6 +238,53 @@ func HTMLReport(cfg *config.Config, snap []stats.FlowSnapshot, verdicts []Verdic
 		return "", err
 	}
 	return path, nil
+}
+
+// worstRow 是窗口最差统计表的一行（v2.11.0；值为格式化字符串，—=无数据）。
+type worstRow struct {
+	Name         string
+	L1, L10, L60 string // 最差丢包率 %
+	D1, D10, D60 string // 最差窗口平均时延 ms
+}
+
+// buildWorstRows 构造窗口最差统计表（v2.11.0）。
+// worst 为 nil、流数不符或全部流无数据（-1）时返回 nil（模板跳过该节）。
+func buildWorstRows(cfg *config.Config, worst []stats.FlowWorst) []worstRow {
+	if len(worst) == 0 {
+		return nil
+	}
+	fmtW := func(v float64) string {
+		if v < 0 {
+			return "—"
+		}
+		return fmt.Sprintf("%.2f", v)
+	}
+	var out []worstRow
+	any := false
+	for i, f := range cfg.Flows {
+		if i >= len(worst) {
+			break
+		}
+		w := worst[i]
+		has := false
+		for k := range w.LossPct {
+			if w.LossPct[k] >= 0 || w.DelayMs[k] >= 0 {
+				has, any = true, true
+			}
+		}
+		if !has {
+			continue // 该流无任何数据（如 send 模式无抓包）
+		}
+		out = append(out, worstRow{
+			Name: f.Name,
+			L1:   fmtW(w.LossPct[0]), L10: fmtW(w.LossPct[1]), L60: fmtW(w.LossPct[2]),
+			D1: fmtW(w.DelayMs[0]), D10: fmtW(w.DelayMs[1]), D60: fmtW(w.DelayMs[2]),
+		})
+	}
+	if !any {
+		return nil
+	}
+	return out
 }
 
 // histBar 是直方图的单个显示柱（把 1ms 精度直方图聚合后的显示桶）。

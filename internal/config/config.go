@@ -33,6 +33,11 @@ type Flow struct {
 	MaxLossRatePct float64 `yaml:"max_loss_rate_pct,omitempty"` // 丢包率阈值 %
 	MaxAvgDelayMs  float64 `yaml:"max_avg_delay_ms,omitempty"`  // 平均时延阈值 ms
 	MaxJitterMs    float64 `yaml:"max_jitter_ms,omitempty"`     // 抖动阈值 ms
+
+	// 阈值判定扩展（v2.11.0）：0/缺省 = 不判定
+	MaxP95DelayMs float64 `yaml:"max_p95_delay_ms,omitempty"` // p95 时延阈值 ms（全程累计）
+	MaxP99DelayMs float64 `yaml:"max_p99_delay_ms,omitempty"` // p99 时延阈值 ms（全程累计）
+	MaxReorder    uint64  `yaml:"max_reorder,omitempty"`      // 乱序包数阈值（累计值）
 }
 
 // Config 是一份完整配置，收发两端共用同一份。
@@ -142,6 +147,13 @@ func (c *Config) validate(requireRates bool) error {
 		}
 		if !finite(f.MaxJitterMs) || f.MaxJitterMs < 0 {
 			return fmt.Errorf("flow %d (%s): max_jitter_ms 必须是有限非负数值", i+1, f.Name)
+		}
+		// v2.11.0 阈值扩展：时延百分位（有限非负）
+		if !finite(f.MaxP95DelayMs) || f.MaxP95DelayMs < 0 {
+			return fmt.Errorf("flow %d (%s): max_p95_delay_ms 必须是有限非负数值", i+1, f.Name)
+		}
+		if !finite(f.MaxP99DelayMs) || f.MaxP99DelayMs < 0 {
+			return fmt.Errorf("flow %d (%s): max_p99_delay_ms 必须是有限非负数值", i+1, f.Name)
 		}
 		src := net.ParseIP(f.SrcIP)
 		dst := net.ParseIP(f.DstIP)

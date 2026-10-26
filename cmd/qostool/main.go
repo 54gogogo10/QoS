@@ -47,6 +47,15 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	// app 子命令 = 显式进入桌面模式（与无参数双击等效；此前误落入 runCLI
+	// 要求 -c 而报用法错误，与 usage 声明不符——GUI 验证时发现）
+	if mode == "app" {
+		if err := runApp(); err != nil {
+			fmt.Fprintln(os.Stderr, "错误:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if mode == "sweep" {
 		if err := runSweep(os.Args[2:]); err != nil {
 			exitOnError(err)
@@ -380,7 +389,7 @@ func runCLI(mode string, args []string) error {
 		vs = report.Verdicts(cfg, snap, true)
 	}
 	if *jsonOut {
-		b, err := report.JSONSummary(cfg, snap, vs, report.ReportMeta{
+		b, err := report.JSONSummary(cfg, snap, vs, agg.WorstWindows(), report.ReportMeta{
 			Started: startedAt, Stopped: time.Now(), Iface: *iface, Mode: string(ctrlMode), Version: report.Version,
 			AutoStopReason: stopReason,
 		}, withTailDiff, ctrl.LastReportPath())
@@ -395,6 +404,10 @@ func runCLI(mode string, args []string) error {
 			fmt.Println("⚠ 自动停止:", stopReason)
 		}
 		fmt.Print(report.Summary(cfg, snap, txTotal, rxTotal, lost, withTailDiff))
+		// v2.11.0：滑动窗口最差统计（有数据才打印）
+		if ws := report.WorstWindowSummary(cfg, agg.WorstWindows()); ws != "" {
+			fmt.Print(ws)
+		}
 		// v2.8.1 控制通道时钟偏差（与测试流 min 法互相印证）
 		if ctrlMode == controller.ModeRecv && srv != nil {
 			if offNs, rttNs, ok := srv.ClockOffsetNs(); ok {

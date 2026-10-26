@@ -19,6 +19,10 @@ flows:
     # max_loss_rate_pct: 0.5   # 丢包率阈值 %
     # max_avg_delay_ms: 50     # 平均时延阈值 ms
     # max_jitter_ms: 10        # 抖动阈值 ms
+    # v2.11.0 阈值扩展：0/缺省=不判定（p95/p99 为全程累计，乱序为累计包数）
+    # max_p95_delay_ms: 20
+    # max_p99_delay_ms: 50
+    # max_reorder: 3
   - name: 视频-AF41
     protocol: udp
     src_ip: 192.168.1.10

@@ -10,7 +10,7 @@ import (
 // Verdict 是单条流的阈值判定结果。
 type Verdict struct {
 	FlowIdx int
-	Checked bool   // 是否配置了任何阈值
+	Checked bool // 是否配置了任何阈值
 	Pass    bool
 	FailMsg string // 违反的阈值描述（多项用 "; " 连接）
 }
@@ -68,6 +68,38 @@ func Verdicts(cfg *config.Config, snap []stats.FlowSnapshot, final bool) []Verdi
 				}
 				v.Pass = false
 				v.FailMsg += fmt.Sprintf("抖动 %.2fms > %.2fms", s.JitterMs, f.MaxJitterMs)
+			}
+		}
+		// v2.11.0：时延百分位阈值（p95/p99 均为全程累计值，实时与最终同源）
+		if f.MaxP95DelayMs > 0 && s.DelayValid && s.DelayP95Ms >= 0 {
+			v.Checked = true
+			if s.DelayP95Ms > f.MaxP95DelayMs {
+				if !v.Pass {
+					v.FailMsg += "; "
+				}
+				v.Pass = false
+				v.FailMsg += fmt.Sprintf("p95 时延 %.2fms > %.2fms", s.DelayP95Ms, f.MaxP95DelayMs)
+			}
+		}
+		if f.MaxP99DelayMs > 0 && s.DelayValid && s.DelayP99Ms >= 0 {
+			v.Checked = true
+			if s.DelayP99Ms > f.MaxP99DelayMs {
+				if !v.Pass {
+					v.FailMsg += "; "
+				}
+				v.Pass = false
+				v.FailMsg += fmt.Sprintf("p99 时延 %.2fms > %.2fms", s.DelayP99Ms, f.MaxP99DelayMs)
+			}
+		}
+		// v2.11.0：乱序包数阈值（累计值；与丢包同款数据门槛防"只发不收"误判）
+		if f.MaxReorder > 0 && (s.RxPackets > 0 || s.Reordered > 0 || (final && s.TxPackets > 0)) {
+			v.Checked = true
+			if s.Reordered > f.MaxReorder {
+				if !v.Pass {
+					v.FailMsg += "; "
+				}
+				v.Pass = false
+				v.FailMsg += fmt.Sprintf("乱序 %d > %d", s.Reordered, f.MaxReorder)
 			}
 		}
 		out[i] = v

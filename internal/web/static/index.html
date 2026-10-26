@@ -109,6 +109,7 @@
         <th>流名</th><th>源 IP</th><th>源端口</th><th>目的 IP</th><th>目的端口</th>
         <th>DSCP</th><th id="thRateMbps">带宽 Mbps</th><th id="thRatePps">包速率 pps</th><th id="thIPLen">IP包长度</th>
         <th>丢包率阈值%</th><th>时延阈值ms</th><th>抖动阈值ms</th>
+        <th>p95时延阈值ms</th><th>p99时延阈值ms</th><th>乱序阈值(包)</th>
       </tr>
     </thead>
     <tbody id="cfgBody"></tbody>
@@ -220,7 +221,8 @@ function loadConfig() {
         cell('name', f.name) + cell('src_ip', f.src_ip) + cell('src_port', f.src_port) +
         cell('dst_ip', f.dst_ip) + cell('dst_port', f.dst_port) + cell('dscp', f.dscp) +
         cell('rate_mbps', f.rate_mbps) + cell('rate_pps', f.rate_pps) + cell('ip_len', f.ip_len) +
-        cell('max_loss_rate_pct', f.max_loss_rate_pct) + cell('max_avg_delay_ms', f.max_avg_delay_ms) + cell('max_jitter_ms', f.max_jitter_ms);
+        cell('max_loss_rate_pct', f.max_loss_rate_pct) + cell('max_avg_delay_ms', f.max_avg_delay_ms) + cell('max_jitter_ms', f.max_jitter_ms) +
+        cell('max_p95_delay_ms', f.max_p95_delay_ms) + cell('max_p99_delay_ms', f.max_p99_delay_ms) + cell('max_reorder', f.max_reorder);
       linkRates(tr);
       body.appendChild(tr);
     }
@@ -362,6 +364,9 @@ async function applyConfig() {
     flow.max_loss_rate_pct = +get('max_loss_rate_pct') || 0;
     flow.max_avg_delay_ms = +get('max_avg_delay_ms') || 0;
     flow.max_jitter_ms = +get('max_jitter_ms') || 0;
+    flow.max_p95_delay_ms = +get('max_p95_delay_ms') || 0;
+    flow.max_p99_delay_ms = +get('max_p99_delay_ms') || 0;
+    flow.max_reorder = +get('max_reorder') || 0;
     flows.push(flow);
   }
   const autoStop = parseFloat($('autoStopSec').value) || 0;
@@ -842,7 +847,7 @@ function showMsg(text, isErr) {
 // ---------- 初始化 ----------
 
 // 可拖动列宽（配置表 12 列 / 统计表 17 列），宽度记忆在 localStorage
-const cfgResize = initTableResize('cfgTable', 'qostool.cfgWidths', [90, 115, 62, 115, 62, 62, 82, 82, 72, 72, 72, 72]);
+const cfgResize = initTableResize('cfgTable', 'qostool.cfgWidths', [90, 115, 62, 115, 62, 62, 82, 82, 72, 72, 72, 72, 62, 62, 62]);
 const statsResize = initTableResize('statsTable', 'qostool.statsWidths', [105, 55, 195, 75, 68, 75, 68, 70, 70, 60, 72, 56, 62, 62, 62, 62, 58]);
 // 速率列在 colgroup 中的索引（配置表第 7/8/9 列）
 const RATE_COL_IDX = [6, 7, 8];

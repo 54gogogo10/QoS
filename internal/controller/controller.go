@@ -339,7 +339,7 @@ func (c *Controller) WriteHTMLReport() (string, error) {
 	vs := report.Verdicts(cfg, snap, true)
 	path, err := report.HTMLReport(cfg, snap, vs, report.ReportMeta{
 		Started: st.Started, Stopped: time.Now(), Iface: st.Iface, Mode: string(mode), Version: report.Version,
-	}, filepath.Join(logDir, "logs"), mode != ModeRecv, agg.DelayHistogram())
+	}, filepath.Join(logDir, "logs"), mode != ModeRecv, agg.WorstWindows(), agg.DelayHistogram())
 	if err != nil {
 		return "", err
 	}
@@ -693,7 +693,7 @@ func (c *Controller) closeLogLocked(agg *stats.Aggregator, started time.Time, if
 		snap := agg.Current(stopped)
 		if path, err := report.HTMLReport(c.cfg, snap, report.Verdicts(c.cfg, snap, true), report.ReportMeta{
 			Started: started, Stopped: stopped, Iface: iface, Mode: string(c.mode), Version: report.Version,
-		}, filepath.Join(c.logDir, "logs"), c.mode != ModeRecv, agg.DelayHistogram()); err != nil {
+		}, filepath.Join(c.logDir, "logs"), c.mode != ModeRecv, agg.WorstWindows(), agg.DelayHistogram()); err != nil {
 			log.Printf("生成 HTML 报告失败: %v", err)
 		} else {
 			c.lastReportPath = path
@@ -734,5 +734,7 @@ func (c *Controller) closeLogLocked(agg *stats.Aggregator, started time.Time, if
 	b = append(b, fmt.Sprintf("\n")...)
 	// recv 模式 TX 来自远端轮询快照（滞后最多 1s），尾部差口径不成立，不参与丢包统计
 	b = append(b, report.Summary(c.cfg, snap, txTotal, rxTotal, lost, c.remoteTX.Load() == nil)...)
+	// v2.11.0：滑动窗口最差统计（有数据才追加）
+	b = append(b, report.WorstWindowSummary(c.cfg, agg.WorstWindows())...)
 	os.WriteFile(sumPath, b, 0o644)
 }

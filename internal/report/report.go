@@ -13,7 +13,7 @@ import (
 
 // Version 当前工具版本号：HTML 报告与 --json 汇总的 Version 字段统一取自这里，
 // 避免多调用点各自硬编码出现不一致。
-const Version = "v2.10.0"
+const Version = "v2.11.0"
 
 func dscpStr(d config.DSCP) string {
 	if n := d.Name(); n != "" {
@@ -120,6 +120,46 @@ func Summary(cfg *config.Config, snap []stats.FlowSnapshot, txTotal, rxTotal, lo
 	return b.String()
 }
 
+// WorstWindowSummary 渲染滑动窗口最差统计（v2.11.0）：每流 1/10/60 秒窗口的
+// 最差丢包率与最差窗口平均时延。验收条款如"任一 1 秒窗口丢包率 ≤ 0.1%"的
+// 答案就在这里（全程累计口径会把短时突发稀释）。
+// 全部流无数据（-1）时返回空串（调用方按需追加）。
+func WorstWindowSummary(cfg *config.Config, worst []stats.FlowWorst) string {
+	any := false
+	for i := range cfg.Flows {
+		if i >= len(worst) {
+			break
+		}
+		for k := range worst[i].LossPct {
+			if worst[i].LossPct[k] >= 0 || worst[i].DelayMs[k] >= 0 {
+				any = true
+			}
+		}
+	}
+	if !any {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("---------- 窗口最差统计（1s/10s/60s 滑动窗口 · 只含已完成整秒）----------\n")
+	b.WriteString(fmt.Sprintf("%-14s %-26s %-26s\n", "流", "最差丢包% (1s/10s/60s)", "最差窗口时延ms (1s/10s/60s)"))
+	fmtW := func(v float64) string {
+		if v < 0 {
+			return "—"
+		}
+		return fmt.Sprintf("%.2f", v)
+	}
+	for i, f := range cfg.Flows {
+		if i >= len(worst) {
+			break
+		}
+		w := worst[i]
+		b.WriteString(fmt.Sprintf("%-14s %-26s %-26s\n", f.Name,
+			fmtW(w.LossPct[0])+"/"+fmtW(w.LossPct[1])+"/"+fmtW(w.LossPct[2]),
+			fmtW(w.DelayMs[0])+"/"+fmtW(w.DelayMs[1])+"/"+fmtW(w.DelayMs[2])))
+	}
+	return b.String()
+}
+
 // jsonFlowOut / jsonSummaryOut 是 --json 模式机器可读汇总的结构。
 // 字段语义与文本汇总一致（v2.8.0）。
 type jsonFlowOut struct {
@@ -139,9 +179,19 @@ type jsonFlowOut struct {
 	DelayMaxMs    float64 `json:"delay_max_ms"`
 	JitterMs      float64 `json:"jitter_ms"`
 	ClockOffsetMs float64 `json:"clock_offset_ms"` // v2.8.1 时钟偏差估计（毫秒，接收端−发送端，接收端快为正）
-	Checked       bool    `json:"checked"`         // 是否配置了阈值
-	Pass          bool    `json:"pass"`
-	FailMsg       string  `json:"fail_msg,omitempty"`
+
+	// v2.11.0 滑动窗口最差统计（索引 0/1/2 = 1s/10s/60s；-1 = 无数据）：
+	// worst_loss_pct_1s 等 6 字段，字段名后缀 _1s/_10s/_60s
+	WorstLoss1sPct  float64 `json:"worst_loss_pct_1s"`
+	WorstLoss10sPct float64 `json:"worst_loss_pct_10s"`
+	WorstLoss60sPct float64 `json:"worst_loss_pct_60s"`
+	WorstDelay1sMs  float64 `json:"worst_delay_ms_1s"`
+	WorstDelay10sMs float64 `json:"worst_delay_ms_10s"`
+	WorstDelay60sMs float64 `json:"worst_delay_ms_60s"`
+
+	Checked bool   `json:"checked"` // 是否配置了阈值
+	Pass    bool   `json:"pass"`
+	FailMsg string `json:"fail_msg,omitempty"`
 }
 
 type jsonSummaryOut struct {
@@ -163,7 +213,8 @@ type jsonSummaryOut struct {
 // 丢包口径与 Summary 一致：withTailDiff=true 计入停止瞬间未确认的尾部差；
 // 判定用最终口径（final=true，由调用方传入 Verdicts 结果）。
 // send 模式传入空 verdicts：不判定（无接收数据），verdict="none"。
-func JSONSummary(cfg *config.Config, snap []stats.FlowSnapshot, verdicts []Verdict, meta ReportMeta, withTailDiff bool, htmlReportPath string) ([]byte, error) {
+// worst 为滑动窗口最差统计（v2.11.0，stats.WorstWindows()；nil 时字段为 -1）。
+func JSONSummary(cfg *config.Config, snap []stats.FlowSnapshot, verdicts []Verdict, worst []stats.FlowWorst, meta ReportMeta, withTailDiff bool, htmlReportPath string) ([]byte, error) {
 	var failCount, checkedCount int
 	flows := make([]jsonFlowOut, 0, len(cfg.Flows))
 	for i, f := range cfg.Flows {
@@ -183,7 +234,17 @@ func JSONSummary(cfg *config.Config, snap []stats.FlowSnapshot, verdicts []Verdi
 			Idx: i, Name: f.Name, DSCP: dscpStr(f.DSCP),
 			TxPackets: s.TxPackets, RxPackets: s.RxPackets,
 			Lost: effLost, LossRatePct: lossPct, Reordered: s.Reordered,
-			DelayValid: s.DelayValid,
+			DelayValid:     s.DelayValid,
+			WorstLoss1sPct: -1, WorstLoss10sPct: -1, WorstLoss60sPct: -1,
+			WorstDelay1sMs: -1, WorstDelay10sMs: -1, WorstDelay60sMs: -1,
+		}
+		if i < len(worst) {
+			jf.WorstLoss1sPct = worst[i].LossPct[0]
+			jf.WorstLoss10sPct = worst[i].LossPct[1]
+			jf.WorstLoss60sPct = worst[i].LossPct[2]
+			jf.WorstDelay1sMs = worst[i].DelayMs[0]
+			jf.WorstDelay10sMs = worst[i].DelayMs[1]
+			jf.WorstDelay60sMs = worst[i].DelayMs[2]
 		}
 		if s.DelayValid {
 			jf.DelayAvgMs = s.DelayTotAvgMs
