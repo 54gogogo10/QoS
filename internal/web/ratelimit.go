@@ -52,10 +52,18 @@ func (l *ctrlRateLimiter) allow(ip string, now time.Time) bool {
 				delete(l.entries, k)
 			}
 		}
-		// 仍满：说明单窗口内出现了超量源地址（异常/滥用），整表重置保内存上界。
-		// 代价是攻击窗口内限流计数归零，可接受（内存安全优先于计数精度）。
-		if len(l.entries) >= rateTabMax {
-			l.entries = map[string]*ctrlRateEntry{}
+		// 仍满：单窗口内出现了超量源地址（代理链/滥用）。逐个淘汰最旧条目
+		// 为新 IP 腾位——存留条目的限流计数保持有效（比整表重置更能维持限流；
+		// O(n) 扫描只在该异常路径发生，表有硬上限不会失控）
+		for len(l.entries) >= rateTabMax {
+			var oldestKey string
+			var oldest time.Time
+			for k, e := range l.entries {
+				if oldestKey == "" || e.start.Before(oldest) {
+					oldestKey, oldest = k, e.start
+				}
+			}
+			delete(l.entries, oldestKey)
 		}
 	}
 	e := l.entries[ip]
@@ -81,8 +89,8 @@ func (s *Server) checkControlGate(w http.ResponseWriter, r *http.Request) bool {
 		writeJSONError(w, http.StatusTooManyRequests, "控制请求过于频繁，请稍后再试")
 		return false
 	}
-	if s.token != "" &&
-		constantTimeEq(r.Header.Get("X-Auth-Token"), s.token) != 1 {
+	if tok := s.authToken(); tok != "" &&
+		constantTimeEq(r.Header.Get("X-Auth-Token"), tok) != 1 {
 		writeJSONError(w, http.StatusUnauthorized, "缺少或错误的 X-Auth-Token 请求头")
 		return false
 	}

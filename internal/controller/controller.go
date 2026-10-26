@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -98,8 +99,10 @@ func New(cfg *config.Config, mode Mode) *Controller {
 }
 
 // autoStopDuration 把配置的秒数转为时长（非法值视为禁用）。
+// NaN/±Inf 防御：正常路径已被 config 校验拦截，此处兜底防止手写 Config
+// （Go 代码直接构造）把未定义时长带入看门狗。
 func autoStopDuration(sec float64) time.Duration {
-	if sec <= 0 {
+	if sec <= 0 || math.IsNaN(sec) || math.IsInf(sec, 0) {
 		return 0
 	}
 	return time.Duration(sec * float64(time.Second))

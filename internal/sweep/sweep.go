@@ -16,10 +16,10 @@ import (
 
 // Options 是阶梯扫描参数；零值使用默认值。
 type Options struct {
-	StepPct         float64       // 每档递增百分比，默认 20
-	Hold            time.Duration // 每档保持时长，默认 10s（含 0.5s settle）
-	MaxScale        float64       // 最大倍率，默认 10
-	LossThresholdPct float64      // 全局丢包率阈值 %，默认 0.5（被每流 max_loss_rate_pct 覆盖）
+	StepPct          float64       // 每档递增百分比，默认 20
+	Hold             time.Duration // 每档保持时长，默认 10s（含 0.5s settle）
+	MaxScale         float64       // 最大倍率，默认 10
+	LossThresholdPct float64       // 全局丢包率阈值 %，默认 0.5（被每流 max_loss_rate_pct 覆盖）
 }
 
 // StepOutcome 是单档的测量结果。
@@ -81,24 +81,24 @@ type jsonStepOut struct {
 type jsonFlowOut struct {
 	Idx       int     `json:"idx"`
 	Name      string  `json:"name"`
-	BaseMbps  float64 `json:"base_mbps"`            // 配置的起始速率（纯 pps 流为 0）
-	BasePPS   float64 `json:"base_pps"`             // 配置的起始 pps（纯带宽流为 0）
-	LimitMbps float64 `json:"limit_mbps"`           // 极限速率（LimitScale 倍；起始档越限时为 0）
-	LimitPPS  float64 `json:"limit_pps"`            // 极限 pps（同上）
-	Threshold float64 `json:"loss_threshold_pct"`   // 该流生效的丢包阈值 %
+	BaseMbps  float64 `json:"base_mbps"`          // 配置的起始速率（纯 pps 流为 0）
+	BasePPS   float64 `json:"base_pps"`           // 配置的起始 pps（纯带宽流为 0）
+	LimitMbps float64 `json:"limit_mbps"`         // 极限速率（LimitScale 倍；起始档越限时为 0）
+	LimitPPS  float64 `json:"limit_pps"`          // 极限 pps（同上）
+	Threshold float64 `json:"loss_threshold_pct"` // 该流生效的丢包阈值 %
 }
 
 type jsonOut struct {
-	Version      string        `json:"version"`
-	StepPct      float64       `json:"step_pct"`
-	HoldS        int           `json:"hold_s"`
-	MaxScale     float64       `json:"max_scale"`
-	LimitScale   float64       `json:"limit_scale"` // 最后一档全部 PASS 的倍率（0=起始档即越限）
-	DoneReason   string        `json:"done_reason"`
-	Verdict      string        `json:"verdict"` // pass=找到极限或全档通过, fail=起始档即越限
-	Flows        []jsonFlowOut `json:"flows"`
-	Steps        []jsonStepOut `json:"steps"`
-	CSVReport    string        `json:"csv_report,omitempty"` // 明细 CSV 路径（由调用方填）
+	Version    string        `json:"version"`
+	StepPct    float64       `json:"step_pct"`
+	HoldS      int           `json:"hold_s"`
+	MaxScale   float64       `json:"max_scale"`
+	LimitScale float64       `json:"limit_scale"` // 最后一档全部 PASS 的倍率（0=起始档即越限）
+	DoneReason string        `json:"done_reason"`
+	Verdict    string        `json:"verdict"` // pass=找到极限或全档通过, fail=起始档即越限
+	Flows      []jsonFlowOut `json:"flows"`
+	Steps      []jsonStepOut `json:"steps"`
+	CSVReport  string        `json:"csv_report,omitempty"` // 明细 CSV 路径（由调用方填）
 }
 
 // JSONSummary 渲染扫描结果的机器可读 JSON（sweep --json 模式，v2.9.0）。
@@ -167,15 +167,20 @@ func newStepMachine(stepPct, maxScale float64, thresholds []float64) *stepMachin
 	return &stepMachine{stepPct: stepPct, maxScale: maxScale, thresholds: thresholds}
 }
 
-// next 处理一档测量结果，返回动作与下一档倍率（actStop 时结果字段就绪）。
-func (m *stepMachine) next(scale float64, losses []float64) stepAction {
-	over := false
+// anyOver 任一流丢包率越限（-1=窗口无数据不计越限）。
+// next（状态机决策）与 scan（StepOutcome.Over 记录）共用同一判定。
+func anyOver(thresholds, losses []float64) bool {
 	for i, l := range losses {
-		if l >= 0 && l > m.thresholds[i] {
-			over = true
-			break
+		if l >= 0 && l > thresholds[i] {
+			return true
 		}
 	}
+	return false
+}
+
+// next 处理一档测量结果，返回动作与下一档倍率（actStop 时结果字段就绪）。
+func (m *stepMachine) next(scale float64, losses []float64) stepAction {
+	over := anyOver(m.thresholds, losses)
 	// 首次越限：保持同档，要求再测一个 hold 确认
 	if over && m.pendingScale == 0 {
 		m.pendingScale = scale
@@ -284,7 +289,6 @@ func scan(ctx context.Context, cfg *config.Config, opts Options, s *sender.Sende
 
 		losses := make([]float64, len(cfg.Flows))
 		rates := make([]float64, len(cfg.Flows))
-		over := false
 		for i := range cfg.Flows {
 			lostΔ := after[i].Lost - before[i].Lost
 			rxΔ := after[i].RxPackets - before[i].RxPackets
@@ -294,11 +298,8 @@ func scan(ctx context.Context, cfg *config.Config, opts Options, s *sender.Sende
 				losses[i] = -1 // 窗口无数据
 			}
 			rates[i] = cfg.Flows[i].RateMbps * scale
-			if losses[i] >= 0 && losses[i] > m.thresholds[i] {
-				over = true
-			}
 		}
-		res.Steps = append(res.Steps, StepOutcome{Scale: scale, RateMbps: rates, LossPct: losses, Over: over})
+		res.Steps = append(res.Steps, StepOutcome{Scale: scale, RateMbps: rates, LossPct: losses, Over: anyOver(m.thresholds, losses)})
 
 		switch m.next(scale, losses) {
 		case actStop:

@@ -2,11 +2,19 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"os"
 
 	"gopkg.in/yaml.v3"
 )
+
+// finite 校验浮点配置值必须是有限数（v2.10.0 审查修复）：
+// YAML 支持 .nan/.inf 字面量，而 NaN 与任何比较均为 false，能绕过
+// "< 0"/"> 上限"式校验；NaN 速率会让 pacing 计算得到未定义的时长。
+func finite(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
+}
 
 // Flow 描述一条测试流。
 type Flow struct {
@@ -110,8 +118,8 @@ func (c *Config) validate(requireRates bool) error {
 	if len(c.Flows) > 8 {
 		return fmt.Errorf("最多支持 8 条流，当前 %d 条", len(c.Flows))
 	}
-	if c.AutoStopSec < 0 || c.AutoStopSec > 2592000 {
-		return fmt.Errorf("auto_stop_sec 必须在 0-2592000（30 天），当前 %v", c.AutoStopSec)
+	if !finite(c.AutoStopSec) || c.AutoStopSec < 0 || c.AutoStopSec > 2592000 {
+		return fmt.Errorf("auto_stop_sec 必须是 0-2592000（30 天）的有限数值，当前 %v", c.AutoStopSec)
 	}
 	for i := range c.Flows {
 		f := &c.Flows[i]
@@ -126,14 +134,14 @@ func (c *Config) validate(requireRates bool) error {
 		if f.Protocol != "udp" {
 			return fmt.Errorf("flow %d (%s): 仅支持 udp 协议", i+1, f.Name)
 		}
-		if f.MaxLossRatePct < 0 || f.MaxLossRatePct > 100 {
-			return fmt.Errorf("flow %d (%s): max_loss_rate_pct 必须在 0-100", i+1, f.Name)
+		if !finite(f.MaxLossRatePct) || f.MaxLossRatePct < 0 || f.MaxLossRatePct > 100 {
+			return fmt.Errorf("flow %d (%s): max_loss_rate_pct 必须是 0-100 的有限数值", i+1, f.Name)
 		}
-		if f.MaxAvgDelayMs < 0 {
-			return fmt.Errorf("flow %d (%s): max_avg_delay_ms 不能为负", i+1, f.Name)
+		if !finite(f.MaxAvgDelayMs) || f.MaxAvgDelayMs < 0 {
+			return fmt.Errorf("flow %d (%s): max_avg_delay_ms 必须是有限非负数值", i+1, f.Name)
 		}
-		if f.MaxJitterMs < 0 {
-			return fmt.Errorf("flow %d (%s): max_jitter_ms 不能为负", i+1, f.Name)
+		if !finite(f.MaxJitterMs) || f.MaxJitterMs < 0 {
+			return fmt.Errorf("flow %d (%s): max_jitter_ms 必须是有限非负数值", i+1, f.Name)
 		}
 		src := net.ParseIP(f.SrcIP)
 		dst := net.ParseIP(f.DstIP)
@@ -152,8 +160,13 @@ func (c *Config) validate(requireRates bool) error {
 		if !requireRates {
 			continue // 接收端：无需速率与包长
 		}
-		if f.RateMbps < 0 || f.RatePPS < 0 {
-			return fmt.Errorf("flow %d (%s): 速率不能为负", i+1, f.Name)
+		if !finite(f.RateMbps) || !finite(f.RatePPS) || f.RateMbps < 0 || f.RatePPS < 0 {
+			return fmt.Errorf("flow %d (%s): 速率必须是有限非负数值（mbps=%v pps=%v）", i+1, f.Name, f.RateMbps, f.RatePPS)
+		}
+		// 速率上限（远超任何真实网卡）：防止荒谬大量级把包间隔压到 1ns、
+		// 批量膨胀成数十万包/批的无 pacing 洪泛
+		if f.RateMbps > 1e6 || f.RatePPS > 1e9 {
+			return fmt.Errorf("flow %d (%s): 速率超出上限（最大 1000000 Mbps / 1000000000 pps）", i+1, f.Name)
 		}
 		if f.RateMbps == 0 && f.RatePPS == 0 {
 			return fmt.Errorf("flow %d (%s): rate_mbps 与 rate_pps 至少填一个", i+1, f.Name)

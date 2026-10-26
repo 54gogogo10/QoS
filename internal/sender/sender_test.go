@@ -2,6 +2,7 @@ package sender
 
 import (
 	"context"
+	"math"
 	"net"
 	"testing"
 	"time"
@@ -135,7 +136,8 @@ func TestSetRatesChangesPacing(t *testing.T) {
 	if err := s.SetRates([]RateSpec{}); err == nil {
 		t.Fatal("长度不符应报错")
 	}
-	// v2.10.0：非法速率校验——负值与 0/0 拒绝（0/0 会被 computePacing 钳成 1pps）
+	// v2.10.0：非法速率校验——负值、非有限值与 0/0 拒绝
+	//（0/0 会被 computePacing 钳成 1pps；NaN/Inf 会算出未定义时长）
 	if err := s.SetRates([]RateSpec{{RateMbps: -1, RatePPS: 0}}); err == nil {
 		t.Fatal("负 Mbps 应报错")
 	}
@@ -144,6 +146,12 @@ func TestSetRatesChangesPacing(t *testing.T) {
 	}
 	if err := s.SetRates([]RateSpec{{RateMbps: 0, RatePPS: 0}}); err == nil {
 		t.Fatal("0/0 应报错（会退化为 1pps）")
+	}
+	if err := s.SetRates([]RateSpec{{RateMbps: math.NaN(), RatePPS: 0}}); err == nil {
+		t.Fatal("NaN 速率应报错")
+	}
+	if err := s.SetRates([]RateSpec{{RateMbps: math.Inf(1), RatePPS: 0}}); err == nil {
+		t.Fatal("+Inf 速率应报错")
 	}
 	if err := s.SetRates([]RateSpec{{RateMbps: 1, RatePPS: 0}}); err != nil {
 		t.Fatalf("合法速率不应报错: %v", err)

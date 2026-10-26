@@ -33,8 +33,8 @@ type Server struct {
 
 	// 控制面访问控制（v2.10.0）：token 为空=不校验（旧行为）；
 	// 非空时控制类端点必须携带匹配的 X-Auth-Token 头（常数时间比较）。
-	// 只允许在 ListenAndServe 之前设置（启动后只读，无锁）。
-	token       string
+	// atomic.Value 存储：SetToken 与请求处理可并发（误用也无数据竞争）。
+	token       atomic.Value // string
 	rateLimiter *ctrlRateLimiter
 
 	remoteMu          sync.Mutex
@@ -96,9 +96,14 @@ func New(ctrls map[controller.Mode]*controller.Controller, cfgPaths map[controll
 // 标记的机器间同步通知）都必须携带匹配的 X-Auth-Token 头。
 // 双机同步场景两端用同一 token：发送端发通知时自动带上本端 token，
 // 接收端 token 为空则不校验（旧版兼容）。
-// 只允许在 ListenAndServe 之前调用。
 func (s *Server) SetToken(tok string) {
-	s.token = strings.TrimSpace(tok)
+	s.token.Store(strings.TrimSpace(tok))
+}
+
+// authToken 原子读取当前令牌（空=未启用校验）。
+func (s *Server) authToken() string {
+	v, _ := s.token.Load().(string)
+	return v
 }
 
 // ctrl 返回指定角色的控制器（CLI 单实例模式下返回唯一实例）。
@@ -567,7 +572,7 @@ func (s *Server) handleStart(w http.ResponseWriter, r *http.Request) {
 		s.receiversMu.Unlock()
 		// 推送监听命令到勾选的接收端
 		for _, addr := range in.Receivers {
-			if msg := NotifyPeerListen(addr, s.token); msg != "" {
+			if msg := NotifyPeerListen(addr, s.authToken()); msg != "" {
 				notifyMsgs = append(notifyMsgs, addr+": "+msg)
 			}
 		}
@@ -632,7 +637,7 @@ func (s *Server) handleStop(w http.ResponseWriter, r *http.Request) {
 			nwg.Add(1)
 			go func(addr string) {
 				defer nwg.Done()
-				if msg := NotifyPeerStop(addr, s.token); msg != "" {
+				if msg := NotifyPeerStop(addr, s.authToken()); msg != "" {
 					log.Printf("[web] 通知接收端 %s 停止失败: %s", addr, msg)
 				}
 			}(addr)
@@ -708,7 +713,7 @@ func (s *Server) NotifyAllReceiversStop() {
 	}
 	s.receiversMu.Unlock()
 	for _, addr := range addrs {
-		if msg := NotifyPeerStop(addr, s.token); msg != "" {
+		if msg := NotifyPeerStop(addr, s.authToken()); msg != "" {
 			log.Printf("[web] 通知接收端 %s 停止失败: %s", addr, msg)
 		}
 	}
@@ -851,7 +856,7 @@ func (s *Server) NotifyAllReceivers() {
 	}
 	s.receiversMu.Unlock()
 	for _, addr := range addrs {
-		NotifyPeerListen(addr, s.token)
+		NotifyPeerListen(addr, s.authToken())
 	}
 }
 

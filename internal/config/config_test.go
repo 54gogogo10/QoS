@@ -67,6 +67,11 @@ func TestLoadErrors(t *testing.T) {
 		{"dscp 越界", "flows:\n  - name: a\n    protocol: udp\n    src_ip: 1.1.1.1\n    dst_ip: 2.2.2.2\n    src_port: 1\n    dst_port: 2\n    dscp: 64\n    rate_pps: 100\n"},
 		{"auto_stop_sec 为负", "auto_stop_sec: -1\nflows:\n" + flowLine()},
 		{"auto_stop_sec 超上限", "auto_stop_sec: 2592001\nflows:\n" + flowLine()},
+		{"auto_stop_sec NaN", "auto_stop_sec: .nan\nflows:\n" + flowLine()},
+		{"速率 NaN", "flows:\n  - name: a\n    protocol: udp\n    src_ip: 1.1.1.1\n    dst_ip: 2.2.2.2\n    src_port: 1\n    dst_port: 2\n    dscp: 0\n    rate_pps: .nan\n"},
+		{"速率 Inf", "flows:\n  - name: a\n    protocol: udp\n    src_ip: 1.1.1.1\n    dst_ip: 2.2.2.2\n    src_port: 1\n    dst_port: 2\n    dscp: 0\n    rate_mbps: .inf\n"},
+		{"速率超上限", "flows:\n  - name: a\n    protocol: udp\n    src_ip: 1.1.1.1\n    dst_ip: 2.2.2.2\n    src_port: 1\n    dst_port: 2\n    dscp: 0\n    rate_mbps: 2000000\n"},
+		{"阈值 NaN", "flows:\n  - name: a\n    protocol: udp\n    src_ip: 1.1.1.1\n    dst_ip: 2.2.2.2\n    src_port: 1\n    dst_port: 2\n    dscp: 0\n    rate_pps: 100\n    max_loss_rate_pct: .nan\n"},
 	}
 	for _, c := range cases {
 		if _, err := Load(writeTemp(t, c.yaml)); err == nil {

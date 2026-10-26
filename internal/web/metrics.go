@@ -5,6 +5,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"qostool/internal/config"
+	"qostool/internal/stats"
 )
 
 // handleMetrics 输出 Prometheus 文本格式指标（v2.10.0，只读）：
@@ -22,50 +25,45 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	st := ctrl.Status()
 	var b []byte
-
-	gauge := func(name, help string, value float64, labels string) {
-		b = append(b, "# HELP "+name+" "+help+"\n# TYPE "+name+" gauge\n"...)
-		b = append(b, name+"{"+labels+"} "+formatFloat(value)+"\n"...)
-	}
-	gauge("qostool_running", "Whether a test is currently running (1=yes).",
+	b = appendGauge(b, "qostool_running", "Whether a test is currently running (1=yes).",
 		boolFloat(st.Running), `mode="`+string(m)+`"`)
-	gauge("qostool_live_scale", "Current live rate scale factor relative to configured rates (v2.10.0).",
+	b = appendGauge(b, "qostool_live_scale", "Current live rate scale factor relative to configured rates (v2.10.0).",
 		st.LiveScale, `mode="`+string(m)+`"`)
 
-	agg := ctrl.Aggregator()
-	if agg != nil {
+	if agg := ctrl.Aggregator(); agg != nil {
 		cfg := ctrl.Config()
 		snap := agg.Current(now)
-		for i, f := range cfg.Flows {
+		type flowRow struct {
+			labels string
+			s      stats.FlowSnapshot
+		}
+		rows := make([]flowRow, 0, len(cfg.Flows))
+		anyDelay := false
+		for i := range cfg.Flows {
 			if i >= len(snap) {
 				break // 配置更新窗口：聚合器流数与配置不一致时跳过多出的流
 			}
-			s := snap[i]
-			labels := flowLabels(i, f.Name, int(f.DSCP), f.SrcIP, f.SrcPort, f.DstIP, f.DstPort)
-			gauge("qostool_tx_bps", "Current transmit rate in bytes per second.", s.TxBps, labels)
-			gauge("qostool_tx_pps", "Current transmit rate in packets per second.", s.TxPps, labels)
-			gauge("qostool_rx_bps", "Current receive rate in bytes per second.", s.RxBps, labels)
-			gauge("qostool_rx_pps", "Current receive rate in packets per second.", s.RxPps, labels)
-			counter := func(name, help string, value uint64) {
-				b = append(b, "# HELP "+name+" "+help+"\n# TYPE "+name+" counter\n"...)
-				b = append(b, name+"{"+labels+"} "+strconv.FormatUint(value, 10)+"\n"...)
+			rows = append(rows, flowRow{labels: flowLabels(i, &cfg.Flows[i]), s: snap[i]})
+			if snap[i].DelayValid {
+				anyDelay = true
 			}
-			counter("qostool_tx_packets_total", "Total transmitted packets.", s.TxPackets)
-			counter("qostool_tx_bytes_total", "Total transmitted bytes.", s.TxBytes)
-			counter("qostool_rx_packets_total", "Total received packets.", s.RxPackets)
-			counter("qostool_rx_bytes_total", "Total received bytes.", s.RxBytes)
-			counter("qostool_lost_total", "Total packets detected lost (seq gaps incl. settled holes).", s.Lost)
-			counter("qostool_reordered_total", "Total packets arrived out of order.", s.Reordered)
-			gauge("qostool_loss_rate", "Loss rate 0..1 (seq holes / expected).", s.LossRate, labels)
-			if s.DelayValid {
-				gauge("qostool_delay_avg_ms", "Window average one-way delay, relative to min observed (ms).", s.DelayAvgMs, labels)
-				gauge("qostool_delay_tot_avg_ms", "Total average one-way delay over the whole run (ms).", s.DelayTotAvgMs, labels)
-				gauge("qostool_delay_min_ms", "Minimum one-way delay over the whole run (ms).", s.DelayMinMs, labels)
-				gauge("qostool_delay_max_ms", "Maximum one-way delay over the whole run (ms).", s.DelayMaxMs, labels)
-				gauge("qostool_delay_p95_ms", "Total p95 one-way delay (ms, 1ms histogram buckets).", s.DelayP95Ms, labels)
-				gauge("qostool_delay_p99_ms", "Total p99 one-way delay (ms, 1ms histogram buckets).", s.DelayP99Ms, labels)
-				gauge("qostool_jitter_ms", "RFC3550 jitter (ms).", s.JitterMs, labels)
-				gauge("qostool_clock_offset_ms", "Estimated clock offset used for delay correction (ms).", s.ClockOffsetMs, labels)
+		}
+		// 族级输出：每族一次 HELP/TYPE 头 + 族内全部序列（exposition 标准布局；
+		// 此前按流循环会重复输出元数据，8 流时响应体多约 1/3）
+		for _, fam := range metricFamilies {
+			if fam.delayOnly && !anyDelay {
+				continue
+			}
+			typ := "gauge"
+			if fam.counter {
+				typ = "counter"
+			}
+			b = append(b, "# HELP "+fam.name+" "+fam.help+"\n# TYPE "+fam.name+" "+typ+"\n"...)
+			for _, row := range rows {
+				if fam.delayOnly && !row.s.DelayValid {
+					continue
+				}
+				b = append(b, fam.name+"{"+row.labels+"} "+fam.value(row.s)+"\n"...)
 			}
 		}
 	}
@@ -74,17 +72,71 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	w.Write(b)
 }
 
-// flowLabels 渲染 Prometheus 标签串（name/IP 等做转义防注入破坏 exposition 格式）。
-func flowLabels(idx int, name string, dscp int, srcIP string, srcPort int, dstIP string, dstPort int) string {
-	return `flow_idx="` + strconv.Itoa(idx) +
-		`",flow="` + escapeLabel(name) +
-		`",dscp="` + strconv.Itoa(dscp) +
-		`",src="` + escapeLabel(netJoinLite(srcIP, srcPort)) +
-		`",dst="` + escapeLabel(netJoinLite(dstIP, dstPort)) + `"`
+// metricFam 描述一个每流指标族。
+type metricFam struct {
+	name      string
+	help      string
+	counter   bool // true=counter，false=gauge
+	delayOnly bool // 仅在存在时延数据时输出该族
+	value     func(stats.FlowSnapshot) string
 }
 
-func netJoinLite(ip string, port int) string {
-	return ip + ":" + strconv.Itoa(port)
+// metricFamilies 每流指标族清单（顺序即输出顺序）。
+// 闭包无捕获，包级初始化一次，请求处理零额外分配。
+var metricFamilies = []metricFam{
+	{name: "qostool_tx_bps", help: "Current transmit rate in bytes per second.",
+		value: func(s stats.FlowSnapshot) string { return formatFloat(s.TxBps) }},
+	{name: "qostool_tx_pps", help: "Current transmit rate in packets per second.",
+		value: func(s stats.FlowSnapshot) string { return formatFloat(s.TxPps) }},
+	{name: "qostool_rx_bps", help: "Current receive rate in bytes per second.",
+		value: func(s stats.FlowSnapshot) string { return formatFloat(s.RxBps) }},
+	{name: "qostool_rx_pps", help: "Current receive rate in packets per second.",
+		value: func(s stats.FlowSnapshot) string { return formatFloat(s.RxPps) }},
+	{name: "qostool_tx_packets_total", help: "Total transmitted packets.", counter: true,
+		value: func(s stats.FlowSnapshot) string { return strconv.FormatUint(s.TxPackets, 10) }},
+	{name: "qostool_tx_bytes_total", help: "Total transmitted bytes.", counter: true,
+		value: func(s stats.FlowSnapshot) string { return strconv.FormatUint(s.TxBytes, 10) }},
+	{name: "qostool_rx_packets_total", help: "Total received packets.", counter: true,
+		value: func(s stats.FlowSnapshot) string { return strconv.FormatUint(s.RxPackets, 10) }},
+	{name: "qostool_rx_bytes_total", help: "Total received bytes.", counter: true,
+		value: func(s stats.FlowSnapshot) string { return strconv.FormatUint(s.RxBytes, 10) }},
+	{name: "qostool_lost_total", help: "Total packets detected lost (seq gaps incl. settled holes).", counter: true,
+		value: func(s stats.FlowSnapshot) string { return strconv.FormatUint(s.Lost, 10) }},
+	{name: "qostool_reordered_total", help: "Total packets arrived out of order.", counter: true,
+		value: func(s stats.FlowSnapshot) string { return strconv.FormatUint(s.Reordered, 10) }},
+	{name: "qostool_loss_rate", help: "Loss rate 0..1 (seq holes / expected).",
+		value: func(s stats.FlowSnapshot) string { return formatFloat(s.LossRate) }},
+	{name: "qostool_delay_avg_ms", help: "Window average one-way delay, relative to min observed (ms).", delayOnly: true,
+		value: func(s stats.FlowSnapshot) string { return formatFloat(s.DelayAvgMs) }},
+	{name: "qostool_delay_tot_avg_ms", help: "Total average one-way delay over the whole run (ms).", delayOnly: true,
+		value: func(s stats.FlowSnapshot) string { return formatFloat(s.DelayTotAvgMs) }},
+	{name: "qostool_delay_min_ms", help: "Minimum one-way delay over the whole run (ms).", delayOnly: true,
+		value: func(s stats.FlowSnapshot) string { return formatFloat(s.DelayMinMs) }},
+	{name: "qostool_delay_max_ms", help: "Maximum one-way delay over the whole run (ms).", delayOnly: true,
+		value: func(s stats.FlowSnapshot) string { return formatFloat(s.DelayMaxMs) }},
+	{name: "qostool_delay_p95_ms", help: "Total p95 one-way delay (ms, 1ms histogram buckets).", delayOnly: true,
+		value: func(s stats.FlowSnapshot) string { return formatFloat(s.DelayP95Ms) }},
+	{name: "qostool_delay_p99_ms", help: "Total p99 one-way delay (ms, 1ms histogram buckets).", delayOnly: true,
+		value: func(s stats.FlowSnapshot) string { return formatFloat(s.DelayP99Ms) }},
+	{name: "qostool_jitter_ms", help: "RFC3550 jitter (ms).", delayOnly: true,
+		value: func(s stats.FlowSnapshot) string { return formatFloat(s.JitterMs) }},
+	{name: "qostool_clock_offset_ms", help: "Estimated clock offset used for delay correction (ms).", delayOnly: true,
+		value: func(s stats.FlowSnapshot) string { return formatFloat(s.ClockOffsetMs) }},
+}
+
+// appendGauge 追加一个单序列 gauge（状态类指标，无流标签）。
+func appendGauge(b []byte, name, help string, value float64, labels string) []byte {
+	b = append(b, "# HELP "+name+" "+help+"\n# TYPE "+name+" gauge\n"...)
+	return append(b, name+"{"+labels+"} "+formatFloat(value)+"\n"...)
+}
+
+// flowLabels 渲染 Prometheus 标签串（name/IP 等做转义防注入破坏 exposition 格式）。
+func flowLabels(idx int, f *config.Flow) string {
+	return `flow_idx="` + strconv.Itoa(idx) +
+		`",flow="` + escapeLabel(f.Name) +
+		`",dscp="` + strconv.Itoa(int(f.DSCP)) +
+		`",src="` + escapeLabel(f.SrcIP+":"+strconv.Itoa(f.SrcPort)) +
+		`",dst="` + escapeLabel(f.DstIP+":"+strconv.Itoa(f.DstPort)) + `"`
 }
 
 // escapeLabel 转义 Prometheus label value 中的反斜杠、双引号与换行。

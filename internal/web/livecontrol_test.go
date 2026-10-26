@@ -8,7 +8,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -184,6 +186,63 @@ func TestRateLimiterWindowReset(t *testing.T) {
 	}
 }
 
+// TestRateLimiterTableCap 超量源 IP 灌满限流表：容量有硬上限，
+// 淘汰最旧条目（而非整表重置——存留条目的计数应保持有效）。
+func TestRateLimiterTableCap(t *testing.T) {
+	l := newCtrlRateLimiter(5, time.Hour)
+	base := time.Now()
+	ip := func(i int) string {
+		return "10." + strconv.Itoa(i/250) + "." + strconv.Itoa(i%250) + ".1"
+	}
+	for i := 0; i < rateTabMax+10; i++ {
+		l.allow(ip(i), base.Add(time.Duration(i)*time.Millisecond)) // 递增 start：最旧可判定
+	}
+	if len(l.entries) > rateTabMax {
+		t.Fatalf("限流表超上限: %d > %d", len(l.entries), rateTabMax)
+	}
+	if l.entries[ip(0)] != nil {
+		t.Fatal("最旧条目应被淘汰")
+	}
+	// 存留条目计数保持：该 IP 已用 1 次（插入时），再 4 次仍放行、第 5+1 次拒绝
+	keep := ip(rateTabMax + 9) // 最新插入的
+	for i := 0; i < 4; i++ {
+		if !l.allow(keep, base.Add(time.Hour)) {
+			t.Fatalf("存留条目计数不应被重置（第 %d 次应放行）", i+2)
+		}
+	}
+	if l.allow(keep, base.Add(time.Hour)) {
+		t.Fatal("第 6 次应被限流")
+	}
+}
+
+// TestTokenAtomicAccess SetToken 与门禁读取并发（-race 回归）：
+// token 用 atomic.Value 存取，运行中修改令牌无数据竞争。
+func TestTokenAtomicAccess(t *testing.T) {
+	s := newTestServer()
+	s.SetToken("t0")
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+				s.SetToken("t" + strconv.Itoa(i%2))
+			}
+		}
+	}()
+	for i := 0; i < 20; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/stop", nil)
+		req.RemoteAddr = "10.9.9.9:1234"
+		s.checkControlGate(httptest.NewRecorder(), req) // 401/200 取决于当前令牌，只求无竞争
+	}
+	close(stop)
+	wg.Wait()
+}
+
 func TestMetrics(t *testing.T) {
 	s := newTestServer()
 	injectAgg(s)
@@ -243,6 +302,31 @@ func TestMetricsDelaySeries(t *testing.T) {
 		if !strings.Contains(b, want) {
 			t.Fatalf("带时间戳数据应输出 %s:\n%s", want, b)
 		}
+	}
+}
+
+// TestMetricsFamilyHeaderOnce 族级输出（v2.10.0 优化）：多流时每个指标族
+// 只输出一次 HELP/TYPE 头，族内各流序列跟在其后（exposition 标准布局）。
+func TestMetricsFamilyHeaderOnce(t *testing.T) {
+	cfg := &config.Config{Flows: []config.Flow{
+		{Name: "a", SrcIP: "1.1.1.1", DstIP: "2.2.2.2", SrcPort: 1, DstPort: 2, DSCP: 46, RateMbps: 1},
+		{Name: "b", SrcIP: "1.1.1.1", DstIP: "2.2.2.2", SrcPort: 3, DstPort: 4, DSCP: 26, RateMbps: 1},
+	}}
+	s := New(map[controller.Mode]*controller.Controller{
+		controller.ModeBidir: controller.New(cfg, controller.ModeBidir),
+	}, map[controller.Mode]string{}, true)
+	s.ctrl(controller.ModeBidir).SetAggregatorForTest(stats.NewAggregator(2, 10))
+	rec := httptest.NewRecorder()
+	s.handleMetrics(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	b := rec.Body.String()
+	if n := strings.Count(b, "# TYPE qostool_tx_bps "); n != 1 {
+		t.Fatalf("tx_bps 族应只有 1 个 TYPE 头, got %d", n)
+	}
+	if n := strings.Count(b, "qostool_tx_bps{"); n != 2 {
+		t.Fatalf("tx_bps 应有 2 条序列（每流一条）, got %d", n)
+	}
+	if n := strings.Count(b, "# HELP qostool_lost_total "); n != 1 {
+		t.Fatalf("lost_total 族应只有 1 个 HELP 头, got %d", n)
 	}
 }
 
